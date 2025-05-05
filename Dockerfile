@@ -6,10 +6,11 @@ WORKDIR /app
 RUN pip install poetry
 
 # 複製 poetry 配置文件
-COPY pyproject.toml poetry.lock ./
+COPY pyproject.toml ./
 
-# 安裝依賴
+# 生成 lock 文件並安裝依賴
 RUN poetry config virtualenvs.create false \
+    && poetry lock \
     && poetry install --no-interaction --no-ansi --no-root
 
 # 複製專案文件
