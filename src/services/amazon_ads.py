@@ -1,7 +1,7 @@
 import httpx
 import json
 import uuid
-from datetime import datetime
+from datetime import datetime, timedelta
 from typing import Dict, Any, List, Optional, Tuple
 import os
 import logging
@@ -39,6 +39,41 @@ except Exception as e:
     # 創建一個空的客戶端，避免代碼中的引用錯誤
     supabase = None
 
+# 添加清理過期狀態記錄的函數
+def cleanup_expired_states(expiration_minutes: int = 30):
+    """
+    清理過期的 state 記錄
+    
+    Args:
+        expiration_minutes: 過期時間（分鐘）
+    """
+    if not supabase:
+        logger.warning("無法清理過期狀態：Supabase 客戶端不可用")
+        return
+    
+    try:
+        # 計算過期時間
+        expiration_time = datetime.now() - timedelta(minutes=expiration_minutes)
+        expiration_iso = expiration_time.isoformat()
+        
+        logger.info(f"正在清理 {expiration_iso} 之前的過期狀態記錄")
+        
+        # 刪除過期記錄
+        # Supabase JS 支持 lt (less than) 運算符，但 Python 客戶端可能有所不同
+        # 這裡使用過濾器功能刪除早於指定時間的記錄
+        result = supabase.table('amazon_ads_states').select('*').lt('created_at', expiration_iso).execute()
+        expired_states = result.data
+        
+        if expired_states:
+            for state in expired_states:
+                supabase.table('amazon_ads_states').delete().eq('id', state.get('id')).execute()
+            
+            logger.info(f"已清理 {len(expired_states)} 條過期狀態記錄")
+        else:
+            logger.info("沒有找到過期的狀態記錄")
+    except Exception as e:
+        logger.error(f"清理過期狀態記錄時出錯: {str(e)}")
+            
 # 初始化 Supabase 表
 def init_supabase_tables():
     """初始化必要的 Supabase 表"""
@@ -53,6 +88,9 @@ def init_supabase_tables():
         try:
             supabase.table('amazon_ads_states').select('id').limit(1).execute()
             logger.info("amazon_ads_states 表已存在")
+            
+            # 首次啟動時清理過期狀態
+            cleanup_expired_states()
         except Exception as e:
             logger.info(f"創建 amazon_ads_states 表...")
             # 在實際情況下，應該通過 Supabase 界面或遷移腳本創建表
@@ -90,6 +128,9 @@ class AmazonAdsService:
         self.token_host = "https://api.amazon.com/auth/o2/token"
         self.api_host = "https://advertising-api.amazon.com"
         
+        # 超時設置（分鐘）
+        self.state_expiration_minutes = 30
+        
         logger.info(f"AmazonAdsService 初始化完成，使用重定向 URL: {self.redirect_uri}")
     
     def generate_auth_url(self, user_id: str) -> Tuple[str, str]:
@@ -105,18 +146,31 @@ class AmazonAdsService:
         # 生成狀態參數用於防止 CSRF 攻擊
         state = str(uuid.uuid4())
         
+        # 嘗試清理過期的狀態記錄
+        try:
+            cleanup_expired_states(self.state_expiration_minutes)
+        except Exception as e:
+            logger.warning(f"清理過期狀態記錄時出錯: {str(e)}")
+        
         # 如果 Supabase 客戶端不可用，僅返回 URL，不保存狀態
         if supabase:
             # 儲存狀態到 Supabase
             try:
-                supabase.table('amazon_ads_states').insert({
+                current_time = datetime.now().isoformat()
+                insert_result = supabase.table('amazon_ads_states').insert({
                     'state': state,
                     'user_id': user_id,
-                    'created_at': datetime.now().isoformat()
+                    'created_at': current_time
                 }).execute()
-                logger.info(f"已保存授權狀態: {state} 用於用戶 {user_id}")
+                
+                if insert_result.data:
+                    logger.info(f"已保存授權狀態: {state} 用於用戶 {user_id}, 時間 {current_time}")
+                else:
+                    logger.warning(f"保存授權狀態失敗，未返回數據: {insert_result}")
             except Exception as e:
                 logger.error(f"保存授權狀態時出錯: {str(e)}")
+                import traceback
+                logger.error(f"詳細錯誤: {traceback.format_exc()}")
         else:
             logger.warning("無法保存授權狀態：Supabase 客戶端不可用")
         
@@ -374,8 +428,14 @@ class AmazonAdsService:
             return "dev_user_id"
         
         try:
+            # 嘗試獲取 amazon_ads_states 表的所有記錄（僅用於調試）
+            debug_result = supabase.table('amazon_ads_states').select('*').limit(10).execute()
+            logger.info(f"表中現有狀態記錄（最多10條）: {[s.get('state') for s in debug_result.data if s]}")
+            
             # 從 Supabase 獲取狀態記錄
+            logger.info(f"查詢狀態: {state}")
             result = supabase.table('amazon_ads_states').select('*').eq('state', state).execute()
+            logger.info(f"狀態查詢結果: {result.data}")
             
             if not result.data:
                 logger.warning(f"未找到狀態: {state}")
@@ -390,6 +450,9 @@ class AmazonAdsService:
             return user_id
         except Exception as e:
             logger.error(f"驗證狀態時出錯: {str(e)}")
+            # 增加更詳細的錯誤信息
+            import traceback
+            logger.error(f"詳細錯誤: {traceback.format_exc()}")
             return None
 
 # 創建服務實例

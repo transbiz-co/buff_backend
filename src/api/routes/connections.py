@@ -1,6 +1,7 @@
 from fastapi import APIRouter, HTTPException, Depends, Query, Path, Request
 from fastapi.responses import RedirectResponse, JSONResponse
 from typing import Optional, List
+from datetime import datetime
 
 from ...models.schemas.amazon_ads import (
     AmazonAdsConnectionResponse,
@@ -9,7 +10,7 @@ from ...models.schemas.amazon_ads import (
     AuthUrlResponse,
     AmazonAdsConnectionStatus
 )
-from ...services.amazon_ads import amazon_ads_service
+from ...services.amazon_ads import amazon_ads_service, supabase
 from ...core.config import settings
 
 router = APIRouter(
@@ -17,6 +18,92 @@ router = APIRouter(
     tags=["connections"],
     responses={404: {"description": "未找到"}}
 )
+
+# 健康檢查 API
+@router.get(
+    "/health",
+    summary="健康檢查",
+    description="檢查 API 和 Supabase 數據庫連接狀態",
+    responses={
+        200: {
+            "description": "系統健康狀態",
+            "content": {
+                "application/json": {
+                    "example": {
+                        "status": "healthy",
+                        "api": {
+                            "status": "ok",
+                            "timestamp": "2023-07-05T12:34:56.789Z"
+                        },
+                        "database": {
+                            "status": "ok",
+                            "connection_success": True,
+                            "tables": ["amazon_ads_states", "amazon_ads_connections"]
+                        }
+                    }
+                }
+            }
+        },
+        500: {"description": "系統不健康"}
+    }
+)
+async def health_check():
+    """
+    健康檢查 API
+    
+    返回:
+        API 和 Supabase 數據庫連接狀態
+    """
+    import logging
+    logger = logging.getLogger(__name__)
+    
+    health_status = {
+        "api": {
+            "status": "ok",
+            "timestamp": datetime.now().isoformat()
+        },
+        "database": {
+            "status": "unknown",
+            "connection_success": False,
+            "tables": []
+        }
+    }
+    
+    # 檢查 Supabase 連接
+    if not supabase:
+        health_status["database"]["status"] = "error"
+        health_status["database"]["message"] = "Supabase client not initialized"
+        health_status["status"] = "unhealthy"
+        return JSONResponse(status_code=500, content=health_status)
+    
+    try:
+        # 嘗試檢查表格
+        tables_to_check = ["amazon_ads_states", "amazon_ads_connections"]
+        available_tables = []
+        
+        for table in tables_to_check:
+            try:
+                result = supabase.table(table).select('id').limit(1).execute()
+                available_tables.append(table)
+            except Exception as e:
+                logger.error(f"檢查表格 {table} 時出錯: {str(e)}")
+        
+        if len(available_tables) == len(tables_to_check):
+            health_status["database"]["status"] = "ok"
+        else:
+            health_status["database"]["status"] = "partial"
+            
+        health_status["database"]["connection_success"] = True
+        health_status["database"]["tables"] = available_tables
+        health_status["status"] = "healthy"
+        
+        return health_status
+    except Exception as e:
+        logger.error(f"健康檢查時出錯: {str(e)}")
+        health_status["database"]["status"] = "error"
+        health_status["database"]["message"] = str(e)
+        health_status["status"] = "unhealthy"
+        return JSONResponse(status_code=500, content=health_status)
 
 # 獲取授權 URL
 @router.get(

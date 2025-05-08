@@ -49,9 +49,13 @@ class AmazonAdsConnection:
         )
     
     def to_dict(self) -> Dict[str, Any]:
-        """轉換為字典以存儲到 Supabase"""
-        return {
-            'id': self.id,
+        """
+        轉換為字典以存儲到 Supabase
+        
+        確保 datetime 對象被轉換為 ISO 格式字符串，解決 JSON 序列化問題
+        同時排除 id 為 None 的情況，以便使用數據庫的 DEFAULT 值
+        """
+        result = {
             'user_id': self.user_id,
             'profile_id': self.profile_id,
             'country_code': self.country_code,
@@ -60,6 +64,12 @@ class AmazonAdsConnection:
             'account_name': self.account_name,
             'account_type': self.account_type,
             'refresh_token': self.refresh_token,
-            'created_at': self.created_at,
-            'updated_at': self.updated_at
+            'created_at': self.created_at.isoformat() if isinstance(self.created_at, datetime) else self.created_at,
+            'updated_at': self.updated_at.isoformat() if isinstance(self.updated_at, datetime) else self.updated_at
         }
+        
+        # 只有在 id 不為 None 時才添加到結果中
+        if self.id is not None:
+            result['id'] = self.id
+            
+        return result
