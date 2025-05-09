@@ -28,7 +28,7 @@ app = FastAPI(
 # 設定 CORS
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=[settings.FRONTEND_URL],
+    allow_origins=["*"],  # 修改為允許所有來源
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
