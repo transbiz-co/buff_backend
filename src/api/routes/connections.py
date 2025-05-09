@@ -209,6 +209,8 @@ async def amazon_ads_callback(
                                 "marketplace_id": "ATVPDKIKX0DER",
                                 "account_name": "My Amazon Account",
                                 "account_type": "seller",
+                                "amazon_account_name": "amazon_user",
+                                "is_active": False,
                                 "timezone": "America/Los_Angeles"
                             }
                         ]
@@ -245,6 +247,8 @@ async def get_connection_status(
             marketplace_id=conn.marketplace_id,
             account_name=conn.account_name,
             account_type=conn.account_type,
+            amazon_account_name=conn.amazon_account_name,
+            is_active=conn.is_active,
             timezone=""  # 可選字段
         ))
     

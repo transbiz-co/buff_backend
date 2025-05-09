@@ -16,6 +16,8 @@ class AmazonAdsConnection:
         account_name: str = "",
         account_type: str = "",
         refresh_token: str = "",
+        amazon_account_name: str = "",
+        is_active: bool = False,
         created_at: Optional[datetime] = None,
         updated_at: Optional[datetime] = None
     ):
@@ -28,6 +30,8 @@ class AmazonAdsConnection:
         self.account_name = account_name
         self.account_type = account_type
         self.refresh_token = refresh_token
+        self.amazon_account_name = amazon_account_name
+        self.is_active = is_active
         self.created_at = created_at or datetime.now()
         self.updated_at = updated_at or datetime.now()
     
@@ -44,6 +48,8 @@ class AmazonAdsConnection:
             account_name=data.get('account_name', ''),
             account_type=data.get('account_type', ''),
             refresh_token=data.get('refresh_token', ''),
+            amazon_account_name=data.get('amazon_account_name', ''),
+            is_active=data.get('is_active', False),
             created_at=data.get('created_at'),
             updated_at=data.get('updated_at')
         )
@@ -64,6 +70,8 @@ class AmazonAdsConnection:
             'account_name': self.account_name,
             'account_type': self.account_type,
             'refresh_token': self.refresh_token,
+            'amazon_account_name': self.amazon_account_name,
+            'is_active': self.is_active,
             'created_at': self.created_at.isoformat() if isinstance(self.created_at, datetime) else self.created_at,
             'updated_at': self.updated_at.isoformat() if isinstance(self.updated_at, datetime) else self.updated_at
         }

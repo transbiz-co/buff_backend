@@ -297,6 +297,10 @@ class AmazonAdsService:
             logger.error(f"加密令牌時出錯: {str(e)}")
             encrypted_token = refresh_token  # 發生錯誤時使用原始令牌
         
+        # 直接使用從API返回的數據
+        account_info = profile.get("accountInfo", {})
+        amazon_account_name = account_info.get("name", "")
+        
         # 創建連接對象
         connection = AmazonAdsConnection(
             user_id=user_id,
@@ -306,7 +310,9 @@ class AmazonAdsService:
             marketplace_id=profile.get("accountInfo", {}).get("marketplaceStringId", ""),
             account_name=profile.get("accountInfo", {}).get("name", ""),
             account_type=profile.get("accountInfo", {}).get("type", ""),
-            refresh_token=encrypted_token
+            refresh_token=encrypted_token,
+            amazon_account_name=amazon_account_name,
+            is_active=False  # 新連接默認為禁用狀態
         )
         
         # 保存到 Supabase

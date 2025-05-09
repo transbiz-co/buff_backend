@@ -12,6 +12,8 @@ class AmazonAdsProfile(BaseModel):
     marketplace_id: str = Field(..., description="Amazon 市場 ID")
     account_name: str = Field(..., description="帳戶名稱")
     account_type: str = Field(..., description="帳戶類型：seller（賣家）、vendor（廠商）或 agency（代理商）")
+    amazon_account_name: str = Field(..., description="廣告帳號所屬的主Amazon帳號名稱")
+    is_active: bool = Field(False, description="廣告帳號是否啟用，默認為false")
 
     class Config:
         schema_extra = {
@@ -22,7 +24,9 @@ class AmazonAdsProfile(BaseModel):
                 "timezone": "America/Los_Angeles",
                 "marketplace_id": "ATVPDKIKX0DER",
                 "account_name": "My Amazon Account",
-                "account_type": "seller"
+                "account_type": "seller",
+                "amazon_account_name": "amazon_user",
+                "is_active": False
             }
         }
 
