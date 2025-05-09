@@ -339,7 +339,6 @@ async def get_connection_status(
             marketplace_id=conn.marketplace_id,
             account_name=conn.account_name,
             account_type=conn.account_type,
-            amazon_account_name=conn.amazon_account_name,
             is_active=conn.is_active,
             timezone="",  # 可選字段
             main_account_id=conn.main_account_id,

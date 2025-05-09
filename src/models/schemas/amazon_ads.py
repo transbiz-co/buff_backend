@@ -12,7 +12,6 @@ class AmazonAdsProfile(BaseModel):
     marketplace_id: str = Field(..., description="Amazon 市場 ID")
     account_name: str = Field(..., description="帳戶名稱")
     account_type: str = Field(..., description="帳戶類型：seller（賣家）、vendor（廠商）或 agency（代理商）")
-    amazon_account_name: str = Field(..., description="廣告帳號所屬的主Amazon帳號名稱")
     is_active: bool = Field(False, description="廣告帳號是否啟用，默認為false")
     main_account_id: Optional[int] = Field(None, description="關聯的Amazon主帳號ID")
     main_account_name: Optional[str] = Field(None, description="主帳號姓名")
@@ -28,7 +27,6 @@ class AmazonAdsProfile(BaseModel):
                 "marketplace_id": "ATVPDKIKX0DER",
                 "account_name": "My Amazon Account",
                 "account_type": "seller",
-                "amazon_account_name": "amazon_user",
                 "is_active": False,
                 "main_account_id": 1,
                 "main_account_name": "John Doe",
