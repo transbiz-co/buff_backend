@@ -178,7 +178,7 @@ class AmazonAdsService:
         auth_url = (
             f"{self.auth_host}"
             f"?client_id={self.client_id}"
-            f"&scope=advertising::campaign_management"
+            f"&scope=advertising::campaign_management profile"
             f"&response_type=code"
             f"&redirect_uri={self.redirect_uri}"
             f"&state={state}"
@@ -331,7 +331,129 @@ class AmazonAdsService:
                 logger.error(f"讀取超時: 請求超時")
             raise
     
-    async def save_connection(self, user_id: str, profile: Dict[str, Any], refresh_token: str) -> AmazonAdsConnection:
+    async def get_amazon_user_profile(self, access_token: str) -> Dict[str, Any]:
+        """
+        獲取 Amazon 主帳號用戶資料
+        
+        Args:
+            access_token: 訪問令牌
+            
+        Returns:
+            Dict[str, Any]: 用戶資料，包含 user_id, name, email 等信息
+        """
+        logger.info("正在獲取 Amazon 主帳號用戶資料...")
+        
+        try:
+            profile_endpoint = "https://api.amazon.com/user/profile"
+            headers = {
+                "Authorization": f"Bearer {access_token}"
+            }
+            
+            logger.info(f"發送請求到端點: {profile_endpoint}")
+            
+            async with httpx.AsyncClient() as client:
+                response = await client.get(profile_endpoint, headers=headers)
+                
+                # 檢查響應狀態
+                if response.status_code == 200:
+                    user_profile = response.json()
+                    
+                    # 日誌記錄，但隱藏敏感信息
+                    safe_profile = {
+                        "user_id": user_profile.get("user_id", "N/A"),
+                        "name": user_profile.get("name", "N/A"),
+                        "email": user_profile.get("email", "")[:3] + "***" if user_profile.get("email") else "N/A",
+                        "postal_code": user_profile.get("postal_code", "N/A")
+                    }
+                    
+                    logger.info(f"成功獲取用戶資料: {safe_profile}")
+                    return user_profile
+                else:
+                    logger.error(f"獲取用戶資料失敗，狀態碼: {response.status_code}")
+                    logger.error(f"錯誤響應: {response.text}")
+                    raise ValueError(f"Failed to get user profile: HTTP {response.status_code}")
+                
+        except Exception as e:
+            import traceback
+            logger.error(f"獲取用戶資料時出錯: {repr(e)}")
+            logger.error(f"詳細錯誤信息: {traceback.format_exc()}")
+            raise
+            
+    async def save_main_account(self, user_id: str, main_account_info: Dict[str, Any]) -> int:
+        """
+        保存主帳號信息到數據庫
+        
+        Args:
+            user_id: 用戶 ID
+            main_account_info: 主帳號信息
+            
+        Returns:
+            int: 主帳號記錄的 ID
+        """
+        logger.info(f"正在保存主帳號信息: 用戶={user_id}")
+        
+        amazon_user_id = main_account_info.get("user_id", "")
+        email = main_account_info.get("email", "")
+        name = main_account_info.get("name", "")
+        postal_code = main_account_info.get("postal_code", "")
+        
+        # 記錄要保存的主帳號信息
+        logger.info(f"主帳號信息詳情:")
+        logger.info(f"  - amazon_user_id: {amazon_user_id}")
+        logger.info(f"  - name: {name}")
+        logger.info(f"  - postal_code: {postal_code}")
+        
+        if not supabase:
+            logger.warning("無法保存主帳號信息：Supabase 客戶端不可用")
+            return None
+        
+        try:
+            # 檢查是否已存在相同 amazon_user_id 的記錄
+            existing_account = supabase.table('amazon_main_accounts').select('*').eq('amazon_user_id', amazon_user_id).execute()
+            
+            if existing_account and existing_account.data:
+                logger.info(f"找到已存在的主帳號記錄，ID={existing_account.data[0]['id']}")
+                
+                # 更新現有記錄
+                supabase.table('amazon_main_accounts').update({
+                    'email': email,
+                    'name': name,
+                    'postal_code': postal_code,
+                    'updated_at': datetime.now().isoformat()
+                }).eq('id', existing_account.data[0]['id']).execute()
+                
+                logger.info(f"已更新主帳號記錄")
+                return existing_account.data[0]['id']
+                
+            else:
+                # 創建新記錄
+                logger.info(f"創建新的主帳號記錄")
+                result = supabase.table('amazon_main_accounts').insert({
+                    'user_id': user_id,
+                    'amazon_user_id': amazon_user_id,
+                    'email': email,
+                    'name': name,
+                    'postal_code': postal_code,
+                    'created_at': datetime.now().isoformat(),
+                    'updated_at': datetime.now().isoformat()
+                }).execute()
+                
+                if result and result.data:
+                    account_id = result.data[0]['id']
+                    logger.info(f"主帳號信息保存成功: ID={account_id}")
+                    return account_id
+                else:
+                    logger.warning("主帳號信息可能未成功保存，無返回數據")
+                    return None
+                    
+        except Exception as e:
+            logger.error(f"保存主帳號信息時出錯: {str(e)}")
+            logger.error(f"詳細錯誤:")
+            import traceback
+            logger.error(traceback.format_exc())
+            return None
+            
+    async def save_connection(self, user_id: str, profile: Dict[str, Any], refresh_token: str, main_account_id: Optional[int] = None) -> AmazonAdsConnection:
         """
         保存連接信息到數據庫
         
@@ -339,6 +461,7 @@ class AmazonAdsService:
             user_id: 用戶 ID
             profile: 配置檔案信息
             refresh_token: 刷新令牌
+            main_account_id: 主帳號 ID
         
         Returns:
             AmazonAdsConnection: 創建的連接
@@ -374,10 +497,6 @@ class AmazonAdsService:
             encrypted_token = refresh_token  # 發生錯誤時使用原始令牌
             logger.warning("使用未加密的令牌作為後備")
         
-        # 直接使用從API返回的數據
-        amazon_account_name = account_info.get("name", "")
-        logger.info(f"設置amazon_account_name={amazon_account_name}")
-        
         # 創建連接對象
         connection = AmazonAdsConnection(
             user_id=user_id,
@@ -388,8 +507,8 @@ class AmazonAdsService:
             account_name=account_name,
             account_type=account_type,
             refresh_token=encrypted_token,
-            amazon_account_name=amazon_account_name,
-            is_active=False  # 新連接默認為禁用狀態
+            is_active=False,  # 新連接默認為禁用狀態
+            main_account_id=main_account_id  # 添加主帳號 ID
         )
         
         # 記錄要保存的連接對象信息
@@ -397,8 +516,8 @@ class AmazonAdsService:
         logger.info(f"  - user_id: {connection.user_id}")
         logger.info(f"  - profile_id: {connection.profile_id}")
         logger.info(f"  - account_name: {connection.account_name}")
-        logger.info(f"  - amazon_account_name: {connection.amazon_account_name}")
         logger.info(f"  - is_active: {connection.is_active}")
+        logger.info(f"  - main_account_id: {connection.main_account_id}")
         
         # 保存到 Supabase
         if supabase:
@@ -441,12 +560,37 @@ class AmazonAdsService:
             return []
         
         try:
+            # 修改查詢，連接 amazon_main_accounts 表以獲取主帳號信息
+            query = """
+            SELECT c.*, 
+                   m.id as main_account_id, 
+                   m.name as main_account_name, 
+                   m.email as main_account_email
+            FROM amazon_ads_connections c
+            LEFT JOIN amazon_main_accounts m ON c.main_account_id = m.id
+            WHERE c.user_id = ?
+            """
+            
             result = supabase.table('amazon_ads_connections').select('*').eq('user_id', user_id).execute()
             
-            # 轉換為連接對象
+            # 如果需要獲取主帳號信息，還需要額外查詢
             connections = []
             for item in result.data:
-                connections.append(AmazonAdsConnection.from_dict(item))
+                connection = AmazonAdsConnection.from_dict(item)
+                
+                # 如果有主帳號ID，尋找對應的主帳號信息
+                if connection.main_account_id:
+                    try:
+                        main_account_result = supabase.table('amazon_main_accounts').select('*').eq('id', connection.main_account_id).execute()
+                        if main_account_result.data:
+                            main_account = main_account_result.data[0]
+                            # 添加主帳號信息到連接對象
+                            connection.main_account_name = main_account.get('name')
+                            connection.main_account_email = main_account.get('email')
+                    except Exception as e:
+                        logger.error(f"獲取主帳號信息時出錯: {str(e)}")
+                
+                connections.append(connection)
             
             logger.info(f"成功獲取 {len(connections)} 個連接")
             return connections

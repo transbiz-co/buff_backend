@@ -14,6 +14,9 @@ class AmazonAdsProfile(BaseModel):
     account_type: str = Field(..., description="帳戶類型：seller（賣家）、vendor（廠商）或 agency（代理商）")
     amazon_account_name: str = Field(..., description="廣告帳號所屬的主Amazon帳號名稱")
     is_active: bool = Field(False, description="廣告帳號是否啟用，默認為false")
+    main_account_id: Optional[int] = Field(None, description="關聯的Amazon主帳號ID")
+    main_account_name: Optional[str] = Field(None, description="主帳號姓名")
+    main_account_email: Optional[str] = Field(None, description="主帳號電子郵件")
 
     class Config:
         schema_extra = {
@@ -26,7 +29,10 @@ class AmazonAdsProfile(BaseModel):
                 "account_name": "My Amazon Account",
                 "account_type": "seller",
                 "amazon_account_name": "amazon_user",
-                "is_active": False
+                "is_active": False,
+                "main_account_id": 1,
+                "main_account_name": "John Doe",
+                "main_account_email": "john.doe@example.com"
             }
         }
 
@@ -100,7 +106,7 @@ class AuthUrlResponse(BaseModel):
     class Config:
         schema_extra = {
             "example": {
-                "auth_url": "https://www.amazon.com/ap/oa?client_id=amzn1.application-oa2-client...&scope=advertising::campaign_management&response_type=code&redirect_uri=..."
+                "auth_url": "https://www.amazon.com/ap/oa?client_id=amzn1.application-oa2-client...&scope=advertising::campaign_management profile&response_type=code&redirect_uri=..."
             }
         }
 

@@ -192,6 +192,17 @@ async def amazon_ads_callback(
             logger.error("未能獲取refresh_token")
             raise ValueError("Failed to get refresh token from Amazon Ads API")
         
+        # 獲取授權主帳號資訊
+        logger.info(f"開始獲取Amazon主帳號資訊")
+        try:
+            main_account_info = await amazon_ads_service.get_amazon_user_profile(access_token)
+            logger.info(f"成功獲取主帳號資訊: name={main_account_info.get('name', 'N/A')}, email={main_account_info.get('email', 'N/A')}")
+        except Exception as e:
+            logger.error(f"獲取主帳號資訊時發生異常: {repr(e)}")
+            logger.error(f"異常詳情: {traceback.format_exc()}")
+            # 繼續處理，主帳號資訊獲取失敗不影響主流程
+            main_account_info = None
+        
         # 獲取配置檔案
         logger.info(f"開始獲取Amazon Ads配置檔案")
         try:
@@ -226,6 +237,13 @@ async def amazon_ads_callback(
             logger.warning("未獲取到任何配置檔案")
             raise ValueError("No Amazon Ads profiles found")
         
+        # 保存主帳號資訊
+        main_account_id = None
+        if main_account_info:
+            logger.info(f"開始保存主帳號資訊，用戶ID: {user_id}")
+            main_account_id = await amazon_ads_service.save_main_account(user_id, main_account_info)
+            logger.info(f"主帳號資訊保存完成，ID: {main_account_id}")
+        
         # 保存連接信息
         logger.info(f"開始保存連接信息，用戶ID: {user_id}")
         
@@ -238,7 +256,7 @@ async def amazon_ads_callback(
             logger.info(f"處理批次 {i//batch_size + 1}/{(len(profiles)-1)//batch_size + 1}，共 {len(batch)} 個配置檔案")
             
             for profile in batch:
-                await amazon_ads_service.save_connection(user_id, profile, refresh_token)
+                await amazon_ads_service.save_connection(user_id, profile, refresh_token, main_account_id)
                 total_saved += 1
             
             logger.info(f"已保存 {total_saved}/{len(profiles)} 個配置檔案")
@@ -282,7 +300,10 @@ async def amazon_ads_callback(
                                 "account_type": "seller",
                                 "amazon_account_name": "amazon_user",
                                 "is_active": False,
-                                "timezone": "America/Los_Angeles"
+                                "timezone": "America/Los_Angeles",
+                                "main_account_id": 1,
+                                "main_account_name": "John Doe",
+                                "main_account_email": "john.doe@example.com"
                             }
                         ]
                     }
@@ -320,7 +341,10 @@ async def get_connection_status(
             account_type=conn.account_type,
             amazon_account_name=conn.amazon_account_name,
             is_active=conn.is_active,
-            timezone=""  # 可選字段
+            timezone="",  # 可選字段
+            main_account_id=conn.main_account_id,
+            main_account_name=conn.main_account_name,
+            main_account_email=conn.main_account_email
         ))
     
     return {
