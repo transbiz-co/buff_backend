@@ -197,7 +197,7 @@ class AmazonAdsService:
         Returns:
             Dict[str, Any]: 包含訪問令牌和刷新令牌的響應
         """
-        logger.info(f"正在交換授權碼: {code[:5]}...")
+        logger.info(f"正在交換授權碼: {code[:10]}...（已截斷）")
         
         payload = {
             "grant_type": "authorization_code",
@@ -208,14 +208,35 @@ class AmazonAdsService:
         }
         
         try:
+            logger.info(f"發送請求到 Amazon token 端點: {self.token_host}")
+            logger.info(f"使用參數: grant_type={payload['grant_type']}, redirect_uri={payload['redirect_uri']}, client_id={payload['client_id'][:8]}...（已截斷）")
+            
             async with httpx.AsyncClient() as client:
                 response = await client.post(self.token_host, data=payload)
                 response.raise_for_status()
                 result = response.json()
-                logger.info(f"成功獲取訪問令牌")
+                
+                # 記錄響應結果（截斷敏感信息）
+                logger.info("成功獲取訪問令牌")
+                logger.info(f"響應狀態碼: {response.status_code}")
+                
+                # 記錄返回的token類型和過期時間
+                token_type = result.get("token_type", "unknown")
+                expires_in = result.get("expires_in", "unknown")
+                logger.info(f"Token類型: {token_type}, 過期時間: {expires_in}秒")
+                
+                # 記錄access_token和refresh_token（已截斷）
+                if "access_token" in result:
+                    logger.info(f"Access Token: {result['access_token'][:10]}...（已截斷）")
+                if "refresh_token" in result:
+                    logger.info(f"Refresh Token: {result['refresh_token'][:10]}...（已截斷）")
+                    
                 return result
         except Exception as e:
             logger.error(f"交換授權碼時出錯: {str(e)}")
+            if isinstance(e, httpx.HTTPStatusError):
+                logger.error(f"HTTP錯誤狀態碼: {e.response.status_code}")
+                logger.error(f"響應內容: {e.response.text}")
             raise
     
     async def refresh_access_token(self, refresh_token: str) -> Dict[str, Any]:
@@ -262,18 +283,52 @@ class AmazonAdsService:
         
         headers = {
             "Authorization": f"Bearer {access_token}",
-            "Amazon-Advertising-API-ClientId": self.client_id
+            "Amazon-Advertising-API-ClientId": self.client_id,
+            "Content-Type": "application/json",
+            "Accept": "application/json"
         }
         
         try:
-            async with httpx.AsyncClient() as client:
-                response = await client.get(f"{self.api_host}/v2/profiles", headers=headers)
+            endpoint = f"{self.api_host}/v2/profiles"
+            logger.info(f"發送請求到端點: {endpoint}")
+            logger.info(f"請求頭部: Client-ID={self.client_id}")
+            
+            async with httpx.AsyncClient(timeout=30.0) as client:
+                response = await client.get(endpoint, headers=headers)
                 response.raise_for_status()
                 profiles = response.json()
+                
+                # 記錄響應狀態和獲取的配置檔案數量
+                logger.info(f"響應狀態碼: {response.status_code}")
                 logger.info(f"成功獲取 {len(profiles)} 個配置檔案")
-                return profiles
+                
+                # 只詳細記錄前幾個配置檔案，避免日誌過長
+                max_detail_profiles = 5  # 只記錄前5個的詳細信息
+                for i, profile in enumerate(profiles):
+                    if i < max_detail_profiles:
+                        logger.info(f"配置檔案 #{i+1} 詳細信息:")
+                        logger.info(f"  - profileId: {profile.get('profileId', 'N/A')}")
+                        logger.info(f"  - countryCode: {profile.get('countryCode', 'N/A')}")
+                        
+                        # 簡化記錄accountInfo內容
+                        account_info = profile.get("accountInfo", {})
+                        logger.info(f"  - accountInfo: id={account_info.get('id', 'N/A')}, name={account_info.get('name', 'N/A')}, type={account_info.get('type', 'N/A')}")
+                    elif i == max_detail_profiles:
+                        logger.info(f"還有 {len(profiles) - max_detail_profiles} 個配置檔案 (省略詳細信息)")
+                        break
+            
+            return profiles
         except Exception as e:
-            logger.error(f"獲取配置檔案時出錯: {str(e)}")
+            import traceback
+            logger.error(f"獲取配置檔案時出錯: {repr(e)}")
+            logger.error(f"詳細錯誤信息: {traceback.format_exc()}")
+            if isinstance(e, httpx.HTTPStatusError):
+                logger.error(f"HTTP錯誤狀態碼: {e.response.status_code}")
+                logger.error(f"響應內容: {e.response.text}")
+            elif isinstance(e, httpx.ConnectError):
+                logger.error(f"連接錯誤: 無法連接到 {self.api_host}")
+            elif isinstance(e, httpx.ReadTimeout):
+                logger.error(f"讀取超時: 請求超時")
             raise
     
     async def save_connection(self, user_id: str, profile: Dict[str, Any], refresh_token: str) -> AmazonAdsConnection:
@@ -288,42 +343,81 @@ class AmazonAdsService:
         Returns:
             AmazonAdsConnection: 創建的連接
         """
-        logger.info(f"正在保存連接: 用戶={user_id}, 配置檔案={profile.get('profileId', '')}")
+        profile_id = profile.get("profileId", "")
+        logger.info(f"正在保存連接: 用戶={user_id}, 配置檔案ID={profile_id}")
+        
+        # 記錄完整的配置檔案信息，幫助診斷
+        logger.info(f"配置檔案詳細信息:")
+        logger.info(f"  - profileId: {profile_id}")
+        logger.info(f"  - countryCode: {profile.get('countryCode', 'N/A')}")
+        logger.info(f"  - currencyCode: {profile.get('currencyCode', 'N/A')}")
+        
+        # 記錄accountInfo內容
+        account_info = profile.get("accountInfo", {})
+        logger.info(f"AccountInfo詳細信息:")
+        for key, value in account_info.items():
+            logger.info(f"  - {key}: {value}")
+        
+        # 特別記錄我們關心的字段
+        marketplace_id = account_info.get("marketplaceStringId", "")
+        account_name = account_info.get("name", "")
+        account_type = account_info.get("type", "")
+        logger.info(f"關鍵字段: name={account_name}, type={account_type}, marketplaceId={marketplace_id}")
         
         # 加密刷新令牌
         try:
+            logger.info("開始加密刷新令牌")
             encrypted_token = encrypt_token(refresh_token)
+            logger.info("刷新令牌加密成功")
         except Exception as e:
             logger.error(f"加密令牌時出錯: {str(e)}")
             encrypted_token = refresh_token  # 發生錯誤時使用原始令牌
+            logger.warning("使用未加密的令牌作為後備")
         
         # 直接使用從API返回的數據
-        account_info = profile.get("accountInfo", {})
         amazon_account_name = account_info.get("name", "")
+        logger.info(f"設置amazon_account_name={amazon_account_name}")
         
         # 創建連接對象
         connection = AmazonAdsConnection(
             user_id=user_id,
-            profile_id=str(profile.get("profileId", "")),
+            profile_id=str(profile_id),
             country_code=profile.get("countryCode", ""),
             currency_code=profile.get("currencyCode", ""),
-            marketplace_id=profile.get("accountInfo", {}).get("marketplaceStringId", ""),
-            account_name=profile.get("accountInfo", {}).get("name", ""),
-            account_type=profile.get("accountInfo", {}).get("type", ""),
+            marketplace_id=marketplace_id,
+            account_name=account_name,
+            account_type=account_type,
             refresh_token=encrypted_token,
             amazon_account_name=amazon_account_name,
             is_active=False  # 新連接默認為禁用狀態
         )
         
+        # 記錄要保存的連接對象信息
+        logger.info(f"準備保存的連接對象:")
+        logger.info(f"  - user_id: {connection.user_id}")
+        logger.info(f"  - profile_id: {connection.profile_id}")
+        logger.info(f"  - account_name: {connection.account_name}")
+        logger.info(f"  - amazon_account_name: {connection.amazon_account_name}")
+        logger.info(f"  - is_active: {connection.is_active}")
+        
         # 保存到 Supabase
         if supabase:
             try:
+                logger.info(f"開始保存到Supabase, 表: amazon_ads_connections")
                 result = supabase.table('amazon_ads_connections').insert(
                     connection.to_dict()
                 ).execute()
-                logger.info(f"連接保存成功: ID={connection.profile_id}")
+                
+                if result and result.data:
+                    logger.info(f"連接保存成功: ID={connection.profile_id}")
+                    logger.info(f"Supabase返回數據: {result.data}")
+                else:
+                    logger.warning(f"連接可能未成功保存，無返回數據")
             except Exception as e:
                 logger.error(f"保存連接時出錯: {str(e)}")
+                logger.error(f"詳細錯誤:")
+                import traceback
+                logger.error(traceback.format_exc())
         else:
             logger.warning("無法保存連接：Supabase 客戶端不可用")
         

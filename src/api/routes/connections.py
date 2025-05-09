@@ -154,37 +154,108 @@ async def amazon_ads_callback(
     返回:
         重定向到前端，帶有成功或錯誤狀態
     """
+    import logging
+    import traceback
+    logger = logging.getLogger(__name__)
+    
+    # 詳細記錄收到的授權碼
+    logger.info(f"===== Amazon Callback 收到的授權碼 =====")
+    logger.info(f"授權碼: {code[:10]}...（已截斷）")
+    logger.info(f"狀態參數: {state}")
+    
     # 驗證狀態參數
     user_id = amazon_ads_service.validate_state(state)
     if not user_id:
-        raise HTTPException(status_code=400, detail="Invalid state parameter")
+        logger.error(f"狀態參數驗證失敗: {state}")
+        # 返回錯誤到前端
+        error_msg = "Invalid state parameter"
+        frontend_url = f"{settings.FRONTEND_URL}/connections?status=error&message={error_msg}"
+        return RedirectResponse(url=frontend_url)
     
     try:
         # 交換授權碼獲取訪問令牌
+        logger.info(f"開始交換授權碼獲取訪問令牌")
         token_response = await amazon_ads_service.exchange_authorization_code(code)
         access_token = token_response.get("access_token")
         refresh_token = token_response.get("refresh_token")
         
-        if not access_token or not refresh_token:
-            raise HTTPException(status_code=400, detail="Failed to get access token")
+        # 記錄token信息（截斷顯示）
+        if access_token:
+            logger.info(f"成功獲取access_token: {access_token[:10]}...（已截斷）")
+        else:
+            logger.error("未能獲取access_token")
+            raise ValueError("Failed to get access token from Amazon Ads API")
+            
+        if refresh_token:
+            logger.info(f"成功獲取refresh_token: {refresh_token[:10]}...（已截斷）")
+        else:
+            logger.error("未能獲取refresh_token")
+            raise ValueError("Failed to get refresh token from Amazon Ads API")
         
         # 獲取配置檔案
-        profiles = await amazon_ads_service.get_profiles(access_token)
+        logger.info(f"開始獲取Amazon Ads配置檔案")
+        try:
+            profiles = await amazon_ads_service.get_profiles(access_token)
+        except Exception as e:
+            logger.error(f"獲取配置檔案時發生異常: {repr(e)}")
+            logger.error(f"異常詳情: {traceback.format_exc()}")
+            raise ValueError(f"Failed to get Amazon Ads profiles: {str(e) or 'Unknown error'}")
         
-        if not profiles:
-            raise HTTPException(status_code=400, detail="No Amazon Ads profiles found")
+        # 記錄獲取到的配置檔案數量及關鍵信息
+        if profiles:
+            logger.info(f"成功獲取{len(profiles)}個配置檔案")
+            
+            # 設置處理上限，避免一次處理太多配置檔案
+            MAX_PROFILES_TO_PROCESS = 120
+            if len(profiles) > MAX_PROFILES_TO_PROCESS:
+                logger.warning(f"配置檔案數量 ({len(profiles)}) 超過處理上限 ({MAX_PROFILES_TO_PROCESS})，將只處理前 {MAX_PROFILES_TO_PROCESS} 個")
+                profiles = profiles[:MAX_PROFILES_TO_PROCESS]
+            
+            # 記錄前幾個配置檔案的基本信息
+            max_log_profiles = 3
+            for i, profile in enumerate(profiles):
+                if i < max_log_profiles:
+                    logger.info(f"配置檔案 #{i+1}:")
+                    logger.info(f"  - profileId: {profile.get('profileId', 'N/A')}")
+                    logger.info(f"  - countryCode: {profile.get('countryCode', 'N/A')}")
+                    logger.info(f"  - accountInfo.name: {profile.get('accountInfo', {}).get('name', 'N/A')}")
+                elif i == max_log_profiles:
+                    logger.info(f"還有 {len(profiles) - max_log_profiles} 個配置檔案，省略日誌...")
+                    break
+        else:
+            logger.warning("未獲取到任何配置檔案")
+            raise ValueError("No Amazon Ads profiles found")
         
         # 保存連接信息
-        for profile in profiles:
-            await amazon_ads_service.save_connection(user_id, profile, refresh_token)
+        logger.info(f"開始保存連接信息，用戶ID: {user_id}")
+        
+        # 使用批量處理來優化性能
+        batch_size = 10  # 每批處理10個配置檔案
+        total_saved = 0
+        
+        for i in range(0, len(profiles), batch_size):
+            batch = profiles[i:min(i+batch_size, len(profiles))]
+            logger.info(f"處理批次 {i//batch_size + 1}/{(len(profiles)-1)//batch_size + 1}，共 {len(batch)} 個配置檔案")
+            
+            for profile in batch:
+                await amazon_ads_service.save_connection(user_id, profile, refresh_token)
+                total_saved += 1
+            
+            logger.info(f"已保存 {total_saved}/{len(profiles)} 個配置檔案")
+        
+        logger.info(f"連接保存完成，共保存 {total_saved} 個配置檔案")
         
         # 重定向回前端
         frontend_url = f"{settings.FRONTEND_URL}/connections?status=success"
+        logger.info(f"授權流程完成，重定向到: {frontend_url}")
         return RedirectResponse(url=frontend_url)
     
     except Exception as e:
         # 處理錯誤
-        frontend_url = f"{settings.FRONTEND_URL}/connections?status=error&message={str(e)}"
+        error_detail = str(e) if str(e) else "Unknown error occurred"
+        logger.error(f"授權處理過程中發生錯誤: {repr(e)}")
+        logger.error(f"錯誤詳情: {traceback.format_exc()}")
+        frontend_url = f"{settings.FRONTEND_URL}/connections?status=error&message={error_detail}"
         return RedirectResponse(url=frontend_url)
 
 # 獲取連接狀態
