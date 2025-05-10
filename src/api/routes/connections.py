@@ -2,6 +2,11 @@ from fastapi import APIRouter, HTTPException, Depends, Query, Path, Request
 from fastapi.responses import RedirectResponse, JSONResponse
 from typing import Optional, List
 from datetime import datetime
+import time
+import logging
+
+# 設定全局日誌
+logger = logging.getLogger(__name__)
 
 from ...models.schemas.amazon_ads import (
     AmazonAdsConnectionResponse,
@@ -54,9 +59,6 @@ async def health_check():
     返回:
         API 和 Supabase 數據庫連接狀態
     """
-    import logging
-    logger = logging.getLogger(__name__)
-    
     health_status = {
         "api": {
             "status": "ok",
@@ -154,9 +156,7 @@ async def amazon_ads_callback(
     返回:
         重定向到前端，帶有成功或錯誤狀態
     """
-    import logging
     import traceback
-    logger = logging.getLogger(__name__)
     
     # 詳細記錄收到的授權碼
     logger.info(f"===== Amazon Callback 收到的授權碼 =====")
@@ -276,6 +276,10 @@ async def amazon_ads_callback(
         frontend_url = f"{settings.FRONTEND_URL}/connections?status=error&message={error_detail}"
         return RedirectResponse(url=frontend_url)
 
+# 簡單的內存緩存
+connection_cache = {}
+CONNECTION_CACHE_TTL = 60  # 緩存有效期（秒）
+
 # 獲取連接狀態
 @router.get(
     "/amazon-ads/status", 
@@ -313,21 +317,34 @@ async def amazon_ads_callback(
     }
 )
 async def get_connection_status(
-    user_id: str = Query(..., description="用戶 ID")
+    user_id: str = Query(..., description="用戶 ID"),
+    bypass_cache: bool = Query(False, description="是否跳過緩存")
 ):
     """
-    獲取用戶的 Amazon Ads 連接狀態
+    獲取用戶的 Amazon Ads 連接狀態，支持緩存
     
     參數:
         user_id: 用戶 ID
+        bypass_cache: 是否跳過緩存
         
     返回:
         連接狀態和配置檔案列表
     """
+    # 檢查緩存
+    cache_key = f"connections_{user_id}"
+    current_time = time.time()
+    if not bypass_cache and cache_key in connection_cache:
+        cache_entry = connection_cache[cache_key]
+        if current_time - cache_entry['timestamp'] < CONNECTION_CACHE_TTL:
+            logger.info(f"返回緩存的連接數據: {len(cache_entry['data']['profiles'])} 個連接")
+            return cache_entry['data']
+    
+    # 獲取連接
     connections = await amazon_ads_service.get_user_connections(user_id)
     
     if not connections:
-        return {"connected": False, "user_id": user_id, "profiles": []}
+        response_data = {"connected": False, "user_id": user_id, "profiles": []}
+        return response_data
     
     # 構建配置檔案列表
     profiles = []
@@ -346,11 +363,19 @@ async def get_connection_status(
             main_account_email=conn.main_account_email
         ))
     
-    return {
+    response_data = {
         "connected": True,
         "user_id": user_id,
         "profiles": profiles
     }
+    
+    # 更新緩存
+    connection_cache[cache_key] = {
+        'data': response_data,
+        'timestamp': current_time
+    }
+    
+    return response_data
 
 # 刷新訪問令牌
 @router.post(

@@ -545,7 +545,7 @@ class AmazonAdsService:
     
     async def get_user_connections(self, user_id: str) -> List[AmazonAdsConnection]:
         """
-        獲取用戶的 Amazon Ads 連接
+        獲取用戶的 Amazon Ads 連接，使用外鍵關聯一次性獲取主帳號信息
         
         Args:
             user_id: 用戶 ID
@@ -560,42 +560,36 @@ class AmazonAdsService:
             return []
         
         try:
-            # 修改查詢，連接 amazon_main_accounts 表以獲取主帳號信息
-            query = """
-            SELECT c.*, 
-                   m.id as main_account_id, 
-                   m.name as main_account_name, 
-                   m.email as main_account_email
-            FROM amazon_ads_connections c
-            LEFT JOIN amazon_main_accounts m ON c.main_account_id = m.id
-            WHERE c.user_id = ?
-            """
+            # 使用外鍵關聯語法一次性獲取所有數據，避免N+1查詢問題
+            result = supabase.table('amazon_ads_connections').select("""
+                *,
+                amazon_main_accounts!main_account_id (
+                    id,
+                    name,
+                    email
+                )
+            """).eq('user_id', user_id).execute()
             
-            result = supabase.table('amazon_ads_connections').select('*').eq('user_id', user_id).execute()
-            
-            # 如果需要獲取主帳號信息，還需要額外查詢
+            # 處理結果
             connections = []
             for item in result.data:
-                connection = AmazonAdsConnection.from_dict(item)
+                conn_data = dict(item)
+                # 從嵌套數據中提取主帳號信息
+                main_account = conn_data.pop('amazon_main_accounts', None)
+                if main_account:
+                    conn_data['main_account_name'] = main_account.get('name')
+                    conn_data['main_account_email'] = main_account.get('email')
                 
-                # 如果有主帳號ID，尋找對應的主帳號信息
-                if connection.main_account_id:
-                    try:
-                        main_account_result = supabase.table('amazon_main_accounts').select('*').eq('id', connection.main_account_id).execute()
-                        if main_account_result.data:
-                            main_account = main_account_result.data[0]
-                            # 添加主帳號信息到連接對象
-                            connection.main_account_name = main_account.get('name')
-                            connection.main_account_email = main_account.get('email')
-                    except Exception as e:
-                        logger.error(f"獲取主帳號信息時出錯: {str(e)}")
-                
+                # 創建連接對象
+                connection = AmazonAdsConnection.from_dict(conn_data)
                 connections.append(connection)
             
-            logger.info(f"成功獲取 {len(connections)} 個連接")
+            logger.info(f"成功獲取 {len(connections)} 個連接（使用外鍵關聯查詢）")
             return connections
         except Exception as e:
             logger.error(f"獲取用戶連接時出錯: {str(e)}")
+            import traceback
+            logger.error(f"詳細錯誤: {traceback.format_exc()}")
             return []
     
     async def get_connection_by_profile_id(self, profile_id: str) -> Optional[AmazonAdsConnection]:
