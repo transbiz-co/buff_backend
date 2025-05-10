@@ -287,107 +287,6 @@ async def amazon_ads_callback(
         frontend_url = f"{settings.FRONTEND_URL}/connections?status=error&message={error_detail}"
         return RedirectResponse(url=frontend_url)
 
-# 簡單的內存緩存
-connection_cache = {}
-CONNECTION_CACHE_TTL = 60  # 緩存有效期（秒）
-
-# 獲取連接狀態
-@router.get(
-    "/amazon-ads/status", 
-    response_model=AmazonAdsConnectionStatus,
-    summary="獲取 Amazon Ads 連接狀態",
-    description="獲取用戶的 Amazon Ads 連接狀態，包括是否已連接以及已連接的配置檔案列表。",
-    responses={
-        200: {
-            "description": "連接狀態和配置檔案列表",
-            "content": {
-                "application/json": {
-                    "example": {
-                        "connected": True,
-                        "user_id": "123456",
-                        "profiles": [
-                            {
-                                "profile_id": "111222333",
-                                "country_code": "US",
-                                "currency_code": "USD",
-                                "marketplace_id": "ATVPDKIKX0DER",
-                                "account_name": "My Amazon Account",
-                                "account_type": "seller",
-                                "amazon_account_name": "amazon_user",
-                                "is_active": False,
-                                "timezone": "America/Los_Angeles",
-                                "main_account_id": 1,
-                                "main_account_name": "John Doe",
-                                "main_account_email": "john.doe@example.com"
-                            }
-                        ]
-                    }
-                }
-            }
-        }
-    }
-)
-async def get_connection_status(
-    user_id: str = Query(..., description="用戶 ID"),
-    bypass_cache: bool = Query(False, description="是否跳過緩存")
-):
-    """
-    獲取用戶的 Amazon Ads 連接狀態，支持緩存
-    
-    參數:
-        user_id: 用戶 ID
-        bypass_cache: 是否跳過緩存
-        
-    返回:
-        連接狀態和配置檔案列表
-    """
-    # 檢查緩存
-    cache_key = f"connections_{user_id}"
-    current_time = time.time()
-    if not bypass_cache and cache_key in connection_cache:
-        cache_entry = connection_cache[cache_key]
-        if current_time - cache_entry['timestamp'] < CONNECTION_CACHE_TTL:
-            logger.info(f"返回緩存的連接數據: {len(cache_entry['data']['profiles'])} 個連接")
-            return cache_entry['data']
-    
-    # 獲取連接
-    connections = await amazon_ads_service.get_user_connections(user_id)
-    
-    if not connections:
-        response_data = {"connected": False, "user_id": user_id, "profiles": []}
-        return response_data
-    
-    # 構建配置檔案列表
-    profiles = []
-    for conn in connections:
-        profiles.append(AmazonAdsProfile(
-            profile_id=conn.profile_id,
-            country_code=conn.country_code,
-            currency_code=conn.currency_code,
-            marketplace_id=conn.marketplace_id,
-            account_name=conn.account_name,
-            account_type=conn.account_type,
-            is_active=conn.is_active,
-            timezone="",  # 可選字段
-            main_account_id=conn.main_account_id,
-            main_account_name=conn.main_account_name,
-            main_account_email=conn.main_account_email
-        ))
-    
-    response_data = {
-        "connected": True,
-        "user_id": user_id,
-        "profiles": profiles
-    }
-    
-    # 更新緩存
-    connection_cache[cache_key] = {
-        'data': response_data,
-        'timestamp': current_time
-    }
-    
-    return response_data
-
 # 刷新訪問令牌
 @router.post(
     "/amazon-ads/refresh-token", 
@@ -487,3 +386,83 @@ async def delete_connection(
         raise HTTPException(status_code=404, detail="Connection not found")
     
     return {"status": "success", "message": "Connection deleted successfully"}
+
+# 獲取連接狀態
+@router.get(
+    "/amazon-ads/status", 
+    response_model=AmazonAdsConnectionStatus,
+    summary="獲取 Amazon Ads 連接狀態",
+    description="獲取用戶的 Amazon Ads 連接狀態，包括是否已連接以及已連接的配置檔案列表。",
+    responses={
+        200: {
+            "description": "連接狀態和配置檔案列表",
+            "content": {
+                "application/json": {
+                    "example": {
+                        "connected": True,
+                        "user_id": "123456",
+                        "profiles": [
+                            {
+                                "profile_id": "111222333",
+                                "country_code": "US",
+                                "currency_code": "USD",
+                                "marketplace_id": "ATVPDKIKX0DER",
+                                "account_name": "My Amazon Account",
+                                "account_type": "seller",
+                                "amazon_account_name": "amazon_user",
+                                "is_active": False,
+                                "timezone": "America/Los_Angeles",
+                                "main_account_id": 1,
+                                "main_account_name": "John Doe",
+                                "main_account_email": "john.doe@example.com"
+                            }
+                        ]
+                    }
+                }
+            }
+        }
+    }
+)
+async def get_connection_status(
+    user_id: str = Query(..., description="用戶 ID")
+):
+    """
+    獲取用戶的 Amazon Ads 連接狀態
+    
+    參數:
+        user_id: 用戶 ID
+        
+    返回:
+        連接狀態和配置檔案列表
+    """
+    # 直接獲取連接，不使用緩存
+    connections = await amazon_ads_service.get_user_connections(user_id)
+    
+    if not connections:
+        response_data = {"connected": False, "user_id": user_id, "profiles": []}
+        return response_data
+    
+    # 構建配置檔案列表
+    profiles = []
+    for conn in connections:
+        profiles.append(AmazonAdsProfile(
+            profile_id=conn.profile_id,
+            country_code=conn.country_code,
+            currency_code=conn.currency_code,
+            marketplace_id=conn.marketplace_id,
+            account_name=conn.account_name,
+            account_type=conn.account_type,
+            is_active=conn.is_active,
+            timezone="",  # 可選字段
+            main_account_id=conn.main_account_id,
+            main_account_name=conn.main_account_name,
+            main_account_email=conn.main_account_email
+        ))
+    
+    response_data = {
+        "connected": True,
+        "user_id": user_id,
+        "profiles": profiles
+    }
+    
+    return response_data
