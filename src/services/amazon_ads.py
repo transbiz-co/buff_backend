@@ -467,31 +467,17 @@ class AmazonAdsService:
             AmazonAdsConnection: 創建的連接
         """
         profile_id = profile.get("profileId", "")
-        logger.info(f"正在保存連接: 用戶={user_id}, 配置檔案ID={profile_id}")
+        logger.info(f"保存連接: 用戶={user_id}, 配置檔案ID={profile_id}")
         
-        # 記錄完整的配置檔案信息，幫助診斷
-        logger.info(f"配置檔案詳細信息:")
-        logger.info(f"  - profileId: {profile_id}")
-        logger.info(f"  - countryCode: {profile.get('countryCode', 'N/A')}")
-        logger.info(f"  - currencyCode: {profile.get('currencyCode', 'N/A')}")
-        
-        # 記錄accountInfo內容
+        # 精簡日誌輸出，只記錄關鍵信息
         account_info = profile.get("accountInfo", {})
-        logger.info(f"AccountInfo詳細信息:")
-        for key, value in account_info.items():
-            logger.info(f"  - {key}: {value}")
-        
-        # 特別記錄我們關心的字段
         marketplace_id = account_info.get("marketplaceStringId", "")
         account_name = account_info.get("name", "")
         account_type = account_info.get("type", "")
-        logger.info(f"關鍵字段: name={account_name}, type={account_type}, marketplaceId={marketplace_id}")
         
         # 加密刷新令牌
         try:
-            logger.info("開始加密刷新令牌")
             encrypted_token = encrypt_token(refresh_token)
-            logger.info("刷新令牌加密成功")
         except Exception as e:
             logger.error(f"加密令牌時出錯: {str(e)}")
             encrypted_token = refresh_token  # 發生錯誤時使用原始令牌
@@ -511,37 +497,166 @@ class AmazonAdsService:
             main_account_id=main_account_id  # 添加主帳號 ID
         )
         
-        # 記錄要保存的連接對象信息
-        logger.info(f"準備保存的連接對象:")
-        logger.info(f"  - user_id: {connection.user_id}")
-        logger.info(f"  - profile_id: {connection.profile_id}")
-        logger.info(f"  - account_name: {connection.account_name}")
-        logger.info(f"  - is_active: {connection.is_active}")
-        logger.info(f"  - main_account_id: {connection.main_account_id}")
-        
         # 保存到 Supabase
         if supabase:
             try:
-                logger.info(f"開始保存到Supabase, 表: amazon_ads_connections")
                 result = supabase.table('amazon_ads_connections').insert(
                     connection.to_dict()
                 ).execute()
                 
-                if result and result.data:
-                    logger.info(f"連接保存成功: ID={connection.profile_id}")
-                    logger.info(f"Supabase返回數據: {result.data}")
-                else:
+                if not result or not result.data:
                     logger.warning(f"連接可能未成功保存，無返回數據")
             except Exception as e:
                 logger.error(f"保存連接時出錯: {str(e)}")
-                logger.error(f"詳細錯誤:")
                 import traceback
-                logger.error(traceback.format_exc())
+                logger.error(f"詳細錯誤: {traceback.format_exc()}")
         else:
             logger.warning("無法保存連接：Supabase 客戶端不可用")
         
         # 返回創建的連接
         return connection
+    
+    async def bulk_save_connections(self, user_id: str, profiles: List[Dict[str, Any]], refresh_token: str, main_account_id: Optional[int] = None) -> int:
+        """
+        批量保存多個連接信息到數據庫，先檢查已存在的記錄，只保存新的配置檔案
+        
+        Args:
+            user_id: 用戶 ID
+            profiles: 配置檔案信息列表
+            refresh_token: 刷新令牌
+            main_account_id: 主帳號 ID
+        
+        Returns:
+            int: 成功保存的連接數量
+        """
+        if not profiles:
+            logger.warning("沒有配置檔案需要保存")
+            return 0
+            
+        if not supabase:
+            logger.warning("無法批量保存連接：Supabase 客戶端不可用")
+            # 如果 Supabase 不可用，逐個保存
+            saved_count = 0
+            for profile in profiles:
+                await self.save_connection(user_id, profile, refresh_token, main_account_id)
+                saved_count += 1
+            return saved_count
+        
+        # 收集所有 profile ID 用於後續比較
+        profile_ids = [str(profile.get("profileId", "")) for profile in profiles]
+        logger.info(f"待處理的配置檔案數量：{len(profile_ids)}")
+        
+        # 查詢用戶現有的連接記錄
+        try:
+            logger.info(f"檢查用戶 {user_id} 已有的連接記錄")
+            existing_result = supabase.table('amazon_ads_connections') \
+                .select('profile_id') \
+                .eq('user_id', user_id) \
+                .execute()
+            
+            # 獲取已存在的 profile ID 集合
+            existing_profile_ids = set()
+            if existing_result and existing_result.data:
+                existing_profile_ids = {item['profile_id'] for item in existing_result.data}
+                logger.info(f"用戶已有 {len(existing_profile_ids)} 個連接記錄")
+            
+            # 過濾出需要新增的配置檔案
+            new_profile_ids = [pid for pid in profile_ids if pid not in existing_profile_ids]
+            logger.info(f"需要新增的配置檔案數量：{len(new_profile_ids)}")
+            
+            # 如果沒有新配置檔案需要保存，直接返回
+            if not new_profile_ids:
+                logger.info("沒有新的配置檔案需要保存")
+                return 0
+                
+            # 過濾出需要新增的配置檔案對象
+            new_profiles = [p for p in profiles if str(p.get("profileId", "")) in new_profile_ids]
+        except Exception as e:
+            logger.error(f"檢查現有連接記錄時出錯: {str(e)}")
+            # 如果檢查失敗，按原計劃處理所有配置檔案
+            new_profiles = profiles
+            logger.warning("無法檢查現有記錄，將處理所有配置檔案")
+        
+        logger.info(f"批量保存 {len(new_profiles)} 個新配置檔案")
+        
+        # 加密刷新令牌 (所有連接共用同一個)
+        try:
+            encrypted_token = encrypt_token(refresh_token)
+        except Exception as e:
+            logger.error(f"加密令牌時出錯: {str(e)}")
+            encrypted_token = refresh_token  # 發生錯誤時使用原始令牌
+            logger.warning("使用未加密的令牌作為後備")
+        
+        # 準備批量插入數據
+        connections_data = []
+        current_time = datetime.now().isoformat()
+        
+        for profile in new_profiles:
+            profile_id = profile.get("profileId", "")
+            account_info = profile.get("accountInfo", {})
+            marketplace_id = account_info.get("marketplaceStringId", "")
+            account_name = account_info.get("name", "")
+            account_type = account_info.get("type", "")
+            
+            # 創建連接數據
+            connection_dict = {
+                'user_id': user_id,
+                'profile_id': str(profile_id),
+                'country_code': profile.get("countryCode", ""),
+                'currency_code': profile.get("currencyCode", ""),
+                'marketplace_id': marketplace_id,
+                'account_name': account_name,
+                'account_type': account_type,
+                'refresh_token': encrypted_token,
+                'is_active': False,  # 新連接默認為禁用狀態
+                'main_account_id': main_account_id,
+                'created_at': current_time,
+                'updated_at': current_time
+            }
+            
+            connections_data.append(connection_dict)
+        
+        # 如果沒有需要保存的連接數據，直接返回
+        if not connections_data:
+            logger.info("沒有新的連接數據需要保存")
+            return 0
+        
+        # 使用批量插入 (每批最多50個記錄，避免請求過大)
+        batch_size = 50
+        total_saved = 0
+        
+        for i in range(0, len(connections_data), batch_size):
+            batch = connections_data[i:min(i+batch_size, len(connections_data))]
+            
+            try:
+                logger.info(f"保存批次 {i//batch_size + 1}/{(len(connections_data)-1)//batch_size + 1}，共 {len(batch)} 個連接")
+                result = supabase.table('amazon_ads_connections').insert(batch).execute()
+                
+                if result and result.data:
+                    batch_saved = len(result.data)
+                    total_saved += batch_saved
+                    logger.info(f"批次保存成功: {batch_saved}/{len(batch)} 個連接")
+                else:
+                    logger.warning(f"批次保存可能未成功，無返回數據")
+            except Exception as e:
+                logger.error(f"批次保存時出錯: {str(e)}")
+                import traceback
+                logger.error(f"詳細錯誤: {traceback.format_exc()}")
+                
+                # 如果批量保存失敗，嘗試逐個保存這一批次
+                logger.warning(f"嘗試逐個保存批次中的連接")
+                for conn_data in batch:
+                    try:
+                        # 單個保存
+                        result = supabase.table('amazon_ads_connections').insert(conn_data).execute()
+                        
+                        if result and result.data:
+                            total_saved += 1
+                    except Exception as inner_e:
+                        logger.error(f"單個保存連接時出錯: {str(inner_e)}")
+        
+        logger.info(f"批量保存完成，共保存 {total_saved}/{len(connections_data)} 個新連接")
+        return total_saved
     
     async def get_user_connections(self, user_id: str) -> List[AmazonAdsConnection]:
         """

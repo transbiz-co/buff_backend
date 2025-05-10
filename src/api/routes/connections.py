@@ -222,7 +222,7 @@ async def amazon_ads_callback(
                 logger.warning(f"配置檔案數量 ({len(profiles)}) 超過處理上限 ({MAX_PROFILES_TO_PROCESS})，將只處理前 {MAX_PROFILES_TO_PROCESS} 個")
                 profiles = profiles[:MAX_PROFILES_TO_PROCESS]
             
-            # 記錄前幾個配置檔案的基本信息
+            # 日誌只記錄少量配置檔案的基本信息，避免日誌過大
             max_log_profiles = 3
             for i, profile in enumerate(profiles):
                 if i < max_log_profiles:
@@ -245,23 +245,34 @@ async def amazon_ads_callback(
             logger.info(f"主帳號資訊保存完成，ID: {main_account_id}")
         
         # 保存連接信息
-        logger.info(f"開始保存連接信息，用戶ID: {user_id}")
+        logger.info(f"開始處理 {len(profiles)} 個配置檔案，用戶ID: {user_id}")
         
-        # 使用批量處理來優化性能
-        batch_size = 10  # 每批處理10個配置檔案
-        total_saved = 0
-        
-        for i in range(0, len(profiles), batch_size):
-            batch = profiles[i:min(i+batch_size, len(profiles))]
-            logger.info(f"處理批次 {i//batch_size + 1}/{(len(profiles)-1)//batch_size + 1}，共 {len(batch)} 個配置檔案")
+        try:
+            # 使用批量處理方式保存連接，會先檢查哪些是新的配置檔案
+            start_time = time.time()
+            saved_count = await amazon_ads_service.bulk_save_connections(user_id, profiles, refresh_token, main_account_id)
+            elapsed_time = time.time() - start_time
+            logger.info(f"連接保存完成，共處理 {len(profiles)} 個配置檔案，新增 {saved_count} 個，耗時 {elapsed_time:.2f} 秒")
+        except Exception as e:
+            logger.error(f"批量保存連接時發生錯誤: {repr(e)}")
+            # 如果批量保存失敗，嘗試使用舊方法逐個保存
+            logger.warning("嘗試使用單個保存方式作為備用方案")
             
-            for profile in batch:
-                await amazon_ads_service.save_connection(user_id, profile, refresh_token, main_account_id)
-                total_saved += 1
+            # 使用批量處理來優化性能
+            batch_size = 10  # 每批處理10個配置檔案
+            total_saved = 0
             
-            logger.info(f"已保存 {total_saved}/{len(profiles)} 個配置檔案")
-        
-        logger.info(f"連接保存完成，共保存 {total_saved} 個配置檔案")
+            for i in range(0, len(profiles), batch_size):
+                batch = profiles[i:min(i+batch_size, len(profiles))]
+                logger.info(f"處理批次 {i//batch_size + 1}/{(len(profiles)-1)//batch_size + 1}，共 {len(batch)} 個配置檔案")
+                
+                for profile in batch:
+                    await amazon_ads_service.save_connection(user_id, profile, refresh_token, main_account_id)
+                    total_saved += 1
+                
+                logger.info(f"已保存 {total_saved}/{len(profiles)} 個配置檔案")
+            
+            logger.info(f"連接保存完成，共保存 {total_saved} 個配置檔案")
         
         # 重定向回前端
         frontend_url = f"{settings.FRONTEND_URL}/connections?status=success"
