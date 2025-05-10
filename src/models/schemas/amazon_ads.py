@@ -16,6 +16,8 @@ class AmazonAdsProfile(BaseModel):
     main_account_id: Optional[int] = Field(None, description="關聯的Amazon主帳號ID")
     main_account_name: Optional[str] = Field(None, description="主帳號姓名")
     main_account_email: Optional[str] = Field(None, description="主帳號電子郵件")
+    created_at: Optional[str] = Field(None, description="創建時間")
+    updated_at: Optional[str] = Field(None, description="更新時間")
 
     class Config:
         schema_extra = {
@@ -30,7 +32,9 @@ class AmazonAdsProfile(BaseModel):
                 "is_active": False,
                 "main_account_id": 1,
                 "main_account_name": "John Doe",
-                "main_account_email": "john.doe@example.com"
+                "main_account_email": "john.doe@example.com",
+                "created_at": "2023-07-05T12:34:56.789Z",
+                "updated_at": "2023-07-05T12:34:56.789Z"
             }
         }
 

@@ -456,7 +456,10 @@ async def get_connection_status(
             timezone="",  # 可選字段
             main_account_id=conn.main_account_id,
             main_account_name=conn.main_account_name,
-            main_account_email=conn.main_account_email
+            main_account_email=conn.main_account_email,
+            # 添加時間欄位
+            created_at=conn.created_at.isoformat() if hasattr(conn, 'created_at') and conn.created_at else None,
+            updated_at=conn.updated_at.isoformat() if hasattr(conn, 'updated_at') and conn.updated_at else None
         ))
     
     response_data = {
