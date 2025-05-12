@@ -13,7 +13,8 @@ from ...models.schemas.amazon_ads import (
     AmazonAdsProfile,
     AccessTokenResponse,
     AuthUrlResponse,
-    AmazonAdsConnectionStatus
+    AmazonAdsConnectionStatus,
+    AmazonAdsConnectionStatusUpdate
 )
 from ...services.amazon_ads import amazon_ads_service, supabase
 from ...core.config import settings
@@ -469,3 +470,52 @@ async def get_connection_status(
     }
     
     return response_data
+
+# 更新連接狀態
+@router.patch(
+    "/amazon-ads/{profile_id}/status",
+    summary="更新 Amazon Ads 連接狀態",
+    description="啟用或禁用特定 Amazon Ads 配置檔案的連接狀態。",
+    responses={
+        200: {
+            "description": "狀態更新成功",
+            "content": {
+                "application/json": {
+                    "example": {
+                        "status": "success",
+                        "message": "Connection status updated successfully",
+                        "is_active": True
+                    }
+                }
+            }
+        },
+        404: {"description": "找不到連接"},
+        400: {"description": "更新失敗"}
+    }
+)
+async def update_connection_status(
+    profile_id: str = Path(..., description="Amazon Ads 配置檔案 ID"),
+    update_data: AmazonAdsConnectionStatusUpdate = ...,
+):
+    """
+    更新 Amazon Ads 連接狀態
+    
+    參數:
+        profile_id: Amazon Ads 配置檔案 ID
+        update_data: 狀態更新數據
+        
+    返回:
+        更新操作的結果
+    """
+    logger.info(f"正在更新連接狀態: profile_id={profile_id}, is_active={update_data.is_active}")
+    
+    result = await amazon_ads_service.update_connection_status(profile_id, update_data.is_active)
+    
+    if not result:
+        raise HTTPException(status_code=404, detail="Connection not found or update failed")
+    
+    return {
+        "status": "success", 
+        "message": "Connection status updated successfully",
+        "is_active": update_data.is_active
+    }

@@ -133,3 +133,15 @@ class AmazonAdsCallback(BaseModel):
     """Amazon Ads 回調請求數據"""
     code: str = Field(..., description="授權碼，用於交換訪問令牌")
     state: str = Field(..., description="狀態參數，用於防止 CSRF 攻擊")
+
+
+class AmazonAdsConnectionStatusUpdate(BaseModel):
+    """更新 Amazon Ads 連接狀態的請求模型"""
+    is_active: bool = Field(..., description="是否啟用連接")
+    
+    class Config:
+        schema_extra = {
+            "example": {
+                "is_active": True
+            }
+        }

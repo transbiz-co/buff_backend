@@ -738,31 +738,53 @@ class AmazonAdsService:
     
     async def delete_connection(self, profile_id: str) -> bool:
         """
-        刪除連接
+        刪除特定配置檔案的連接
         
         Args:
-            profile_id: 配置檔案 ID
-        
+            profile_id: Amazon Ads 配置檔案 ID
+            
         Returns:
-            bool: 刪除成功返回 True
+            bool: 是否成功刪除
         """
-        logger.info(f"正在刪除連接: profile_id={profile_id}")
-        
-        if not supabase:
-            logger.warning("無法刪除連接：Supabase 客戶端不可用")
-            return False
-        
         try:
+            # 刪除連接
             result = supabase.table('amazon_ads_connections').delete().eq('profile_id', profile_id).execute()
             
-            # 檢查是否刪除成功
-            success = len(result.data) > 0
-            logger.info(f"連接刪除{'成功' if success else '失敗'}: ID={profile_id}")
-            return success
+            if len(result.data) > 0:
+                return True
+            else:
+                return False
         except Exception as e:
-            logger.error(f"刪除連接時出錯: {str(e)}")
+            logger.error(f"刪除連接時出錯: {e}")
             return False
-    
+
+    async def update_connection_status(self, profile_id: str, is_active: bool) -> bool:
+        """
+        更新連接狀態（啟用/禁用）
+        
+        Args:
+            profile_id: Amazon Ads 配置檔案 ID
+            is_active: 是否啟用連接
+            
+        Returns:
+            bool: 是否成功更新
+        """
+        try:
+            # 更新連接狀態
+            result = supabase.table('amazon_ads_connections').update({
+                'is_active': is_active,
+                'updated_at': datetime.now().isoformat()
+            }).eq('profile_id', profile_id).execute()
+            
+            if len(result.data) > 0:
+                return True
+            else:
+                logger.warning(f"未找到配置檔案 {profile_id} 的連接")
+                return False
+        except Exception as e:
+            logger.error(f"更新連接狀態時出錯: {e}")
+            return False
+
     def validate_state(self, state: str) -> Optional[str]:
         """
         驗證狀態參數並返回關聯的用戶 ID
