@@ -793,6 +793,108 @@ class AmazonAdsService:
             logger.error(f"更新連接狀態時出錯: {e}")
             return False
 
+    async def bulk_refresh_tokens(self, user_id: str) -> Dict[str, Any]:
+        """
+        批量刷新用戶所有 Amazon Ads 連接的訪問令牌
+        
+        Args:
+            user_id: 用戶 ID
+            
+        Returns:
+            Dict[str, Any]: 包含刷新結果的詳細信息
+        """
+        logger.info(f"開始為用戶 {user_id} 批量刷新 Amazon Ads 訪問令牌")
+        
+        if not supabase:
+            logger.warning("無法刷新令牌：Supabase 客戶端不可用")
+            return {
+                "success": False,
+                "message": "Database client not available",
+                "total": 0,
+                "refreshed": 0,
+                "failed": 0
+            }
+        
+        # 獲取用戶的所有連接
+        connections = await self.get_user_connections(user_id)
+        
+        if not connections:
+            logger.info(f"用戶 {user_id} 沒有可刷新的連接")
+            return {
+                "success": True,
+                "message": "No connections found to refresh",
+                "total": 0,
+                "refreshed": 0,
+                "failed": 0
+            }
+        
+        logger.info(f"找到 {len(connections)} 個連接需要刷新")
+        
+        # 記錄處理結果
+        total = len(connections)
+        refreshed = 0
+        failed = 0
+        failed_details = []
+        
+        # 解密 token 工具
+        from ..core.security import decrypt_token, encrypt_token
+        
+        # 為每個連接刷新令牌
+        for connection in connections:
+            try:
+                # 移除對 is_active 的檢查，處理所有連接
+                logger.info(f"正在刷新連接: {connection.profile_id} (啟用狀態: {connection.is_active})")
+                
+                # 解密刷新令牌
+                refresh_token = decrypt_token(connection.refresh_token)
+                
+                # 刷新訪問令牌
+                token_response = await self.refresh_access_token(refresh_token)
+                
+                # 檢查是否返回了新的刷新令牌
+                new_refresh_token = token_response.get("refresh_token")
+                if new_refresh_token and new_refresh_token != refresh_token:
+                    logger.info(f"獲取到新的刷新令牌: {connection.profile_id}")
+                    
+                    # 加密新的刷新令牌
+                    encrypted_token = encrypt_token(new_refresh_token)
+                    
+                    # 更新資料庫中的刷新令牌
+                    result = supabase.table('amazon_ads_connections').update({
+                        'refresh_token': encrypted_token,
+                        'updated_at': datetime.now().isoformat()
+                    }).eq('profile_id', connection.profile_id).execute()
+                    
+                    if result and len(result.data) > 0:
+                        logger.info(f"成功更新刷新令牌: {connection.profile_id}")
+                    else:
+                        logger.warning(f"更新刷新令牌可能失敗: {connection.profile_id}")
+                
+                # 記錄成功結果
+                refreshed += 1
+                
+            except Exception as e:
+                # 記錄失敗詳情
+                logger.error(f"刷新連接 {connection.profile_id} 時出錯: {str(e)}")
+                failed += 1
+                failed_details.append({
+                    "profile_id": connection.profile_id,
+                    "error": str(e)
+                })
+        
+        # 返回處理結果
+        result = {
+            "success": True,
+            "message": f"Successfully refreshed {refreshed} out of {total} connections",
+            "total": total,
+            "refreshed": refreshed,
+            "failed": failed,
+            "failed_details": failed_details if failed > 0 else None
+        }
+        
+        logger.info(f"批量刷新完成: 總共 {total} 個連接，成功 {refreshed} 個，失敗 {failed} 個")
+        return result
+
     def validate_state(self, state: str) -> Optional[str]:
         """
         驗證狀態參數並返回關聯的用戶 ID

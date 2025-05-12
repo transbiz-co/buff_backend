@@ -550,3 +550,58 @@ async def update_connection_status(
         "message": "Connection status updated successfully",
         "is_active": update_data.is_active
     }
+
+# 批量刷新令牌
+@router.post(
+    "/amazon-ads/bulk-refresh-tokens",
+    summary="批量刷新 Amazon Ads 訪問令牌",
+    description="批量刷新用戶所有 Amazon Ads 連接的訪問令牌，包括已啟用和未啟用的連接。",
+    responses={
+        200: {
+            "description": "刷新操作結果",
+            "content": {
+                "application/json": {
+                    "example": {
+                        "success": True,
+                        "message": "Successfully refreshed 5 out of 10 connections",
+                        "total": 10,
+                        "refreshed": 5,
+                        "failed": 5,
+                        "failed_details": [
+                            {
+                                "profile_id": "123456789",
+                                "error": "Failed to refresh token: Invalid refresh token"
+                            }
+                        ]
+                    }
+                }
+            }
+        },
+        400: {"description": "刷新令牌失敗"}
+    }
+)
+async def bulk_refresh_tokens(
+    user_id: str = Query(..., description="用戶 ID")
+):
+    """
+    批量刷新用戶所有 Amazon Ads 連接的訪問令牌，包括已啟用和未啟用的連接
+    
+    參數:
+        user_id: 用戶 ID
+        
+    返回:
+        操作結果，包含刷新詳情
+    """
+    logger.info(f"正在批量刷新用戶 {user_id} 的所有 Amazon Ads 訪問令牌")
+    
+    try:
+        # 調用服務方法批量刷新令牌
+        result = await amazon_ads_service.bulk_refresh_tokens(user_id)
+        
+        # 返回處理結果
+        return result
+    except Exception as e:
+        logger.error(f"批量刷新令牌時出錯: {str(e)}")
+        import traceback
+        logger.error(f"詳細錯誤信息: {traceback.format_exc()}")
+        raise HTTPException(status_code=400, detail=f"Failed to bulk refresh tokens: {str(e)}")
