@@ -247,7 +247,7 @@ class AmazonAdsService:
             refresh_token: 刷新令牌
         
         Returns:
-            Dict[str, Any]: 包含新訪問令牌的響應
+            Dict[str, Any]: 包含新訪問令牌和可能的新刷新令牌的響應
         """
         logger.info("正在刷新訪問令牌...")
         
@@ -264,9 +264,17 @@ class AmazonAdsService:
                 response.raise_for_status()
                 result = response.json()
                 logger.info("成功刷新訪問令牌")
+                
+                # 檢查是否返回了新的刷新令牌
+                if "refresh_token" in result:
+                    logger.info("獲取到新的刷新令牌")
+                
                 return result
         except Exception as e:
             logger.error(f"刷新訪問令牌時出錯: {str(e)}")
+            if isinstance(e, httpx.HTTPStatusError):
+                logger.error(f"HTTP錯誤狀態碼: {e.response.status_code}")
+                logger.error(f"響應內容: {e.response.text}")
             raise
     
     async def get_profiles(self, access_token: str) -> List[Dict[str, Any]]:

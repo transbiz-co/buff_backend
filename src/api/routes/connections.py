@@ -296,6 +296,7 @@ async def amazon_ads_callback(
     description="""
     使用保存的刷新令牌獲取新的訪問令牌。
     Amazon Ads 訪問令牌有效期為 60 分鐘，需要定期刷新。
+    如果返回了新的刷新令牌，則會自動更新數據庫。
     """,
     responses={
         200: {
@@ -326,20 +327,49 @@ async def refresh_token(
     返回:
         新的訪問令牌
     """
+    logger.info(f"正在刷新 Amazon Ads 訪問令牌: profile_id={profile_id}")
+    
     # 獲取連接
     connection = await amazon_ads_service.get_connection_by_profile_id(profile_id)
     
     if not connection:
+        logger.error(f"未找到配置檔案 ID 為 {profile_id} 的連接")
         raise HTTPException(status_code=404, detail="Connection not found")
     
     # 解密刷新令牌
-    from ...core.security import decrypt_token
+    from ...core.security import decrypt_token, encrypt_token
     refresh_token = decrypt_token(connection.refresh_token)
     
     try:
         # 刷新訪問令牌
         token_response = await amazon_ads_service.refresh_access_token(refresh_token)
-        
+        logger.info(f"成功刷新訪問令牌，過期時間: {token_response.get('expires_in', 3600)}秒")
+
+        # 檢查是否返回了新的刷新令牌
+        new_refresh_token = token_response.get("refresh_token")
+        if new_refresh_token and new_refresh_token != refresh_token:
+            logger.info("檢測到新的刷新令牌，更新到數據庫")
+            
+            # 加密新的刷新令牌
+            encrypted_token = encrypt_token(new_refresh_token)
+            
+            # 更新數據庫中的刷新令牌
+            if supabase:
+                try:
+                    result = supabase.table('amazon_ads_connections').update({
+                        'refresh_token': encrypted_token,
+                        'updated_at': datetime.now().isoformat()
+                    }).eq('profile_id', profile_id).execute()
+                    
+                    if result and len(result.data) > 0:
+                        logger.info(f"成功更新刷新令牌: profile_id={profile_id}")
+                    else:
+                        logger.warning(f"更新刷新令牌可能失敗: profile_id={profile_id}")
+                except Exception as db_error:
+                    logger.error(f"更新刷新令牌時出錯: {str(db_error)}")
+            else:
+                logger.warning("無法更新刷新令牌: Supabase 客戶端不可用")
+                
         # 返回新的訪問令牌
         return {
             "access_token": token_response.get("access_token"),
@@ -347,6 +377,7 @@ async def refresh_token(
             "expires_in": token_response.get("expires_in", 3600)
         }
     except Exception as e:
+        logger.error(f"刷新訪問令牌失敗: {str(e)}")
         raise HTTPException(status_code=400, detail=f"Failed to refresh token: {str(e)}")
 
 # 刪除連接
