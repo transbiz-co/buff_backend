@@ -144,20 +144,49 @@ async def authorize_amazon_ads(
     """
 )
 async def amazon_ads_callback(
-    code: str = Query(..., description="Amazon 授權碼"),
-    state: str = Query(..., description="狀態參數，用於防止 CSRF 攻擊")
+    code: Optional[str] = Query(None, description="Amazon 授權碼"),
+    state: str = Query(..., description="狀態參數，用於防止 CSRF 攻擊"),
+    error: Optional[str] = Query(None, description="錯誤代碼，當授權失敗時返回"),
+    error_description: Optional[str] = Query(None, description="錯誤描述，當授權失敗時返回")
 ):
     """
     處理 Amazon Ads 授權回調
     
     參數:
-        code: Amazon 授權碼
+        code: Amazon 授權碼 (成功時返回)
         state: 狀態參數，用於防止 CSRF 攻擊
+        error: 錯誤代碼 (失敗時返回)
+        error_description: 錯誤描述 (失敗時返回)
         
     返回:
         重定向到前端，帶有成功或錯誤狀態
     """
     import traceback
+    
+    # 檢查是否有錯誤參數
+    if error:
+        logger.warning(f"授權失敗: {error}")
+        logger.warning(f"錯誤描述: {error_description}")
+        
+        # 驗證狀態參數（即使授權失敗也需要驗證 state）
+        user_id = amazon_ads_service.validate_state(state)
+        if not user_id:
+            logger.error(f"狀態參數驗證失敗: {state}")
+            error_msg = "Invalid state parameter"
+            frontend_url = f"{settings.FRONTEND_URL}/connections?status=error&message={error_msg}"
+            return RedirectResponse(url=frontend_url)
+            
+        # 重定向回前端，帶有錯誤信息
+        frontend_url = f"{settings.FRONTEND_URL}/connections?status=error&message={error_description or error}"
+        logger.info(f"授權被取消，重定向到: {frontend_url}")
+        return RedirectResponse(url=frontend_url)
+    
+    # 如果沒有錯誤但也沒有授權碼，返回錯誤
+    if not code:
+        logger.error("既沒有授權碼也沒有錯誤參數")
+        error_msg = "Missing authorization code"
+        frontend_url = f"{settings.FRONTEND_URL}/connections?status=error&message={error_msg}"
+        return RedirectResponse(url=frontend_url)
     
     # 詳細記錄收到的授權碼
     logger.info(f"===== Amazon Callback 收到的授權碼 =====")
