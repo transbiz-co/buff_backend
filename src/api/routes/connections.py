@@ -4,10 +4,9 @@ from typing import Optional, List
 from datetime import datetime
 import time
 import logging
+import traceback
 
-# 設定全局日誌
-logger = logging.getLogger(__name__)
-
+from ...core.security import decrypt_token, encrypt_token
 from ...models.schemas.amazon_ads import (
     AmazonAdsConnectionResponse,
     AmazonAdsProfile,
@@ -18,6 +17,9 @@ from ...models.schemas.amazon_ads import (
 )
 from ...services.amazon_ads import amazon_ads_service, supabase
 from ...core.config import settings
+
+# 設定全局日誌
+logger = logging.getLogger(__name__)
 
 router = APIRouter(
     prefix="/connections", 
@@ -161,8 +163,6 @@ async def amazon_ads_callback(
     返回:
         重定向到前端，帶有成功或錯誤狀態
     """
-    import traceback
-    
     # 檢查是否有錯誤參數
     if error:
         logger.warning(f"授權失敗: {error}")
@@ -218,6 +218,7 @@ async def amazon_ads_callback(
             
         if refresh_token:
             logger.info(f"成功獲取refresh_token: {refresh_token[:10]}...（已截斷）")
+            logger.info(f"refresh_token: {refresh_token}")
         else:
             logger.error("未能獲取refresh_token")
             raise ValueError("Failed to get refresh token from Amazon Ads API")
@@ -271,7 +272,7 @@ async def amazon_ads_callback(
         main_account_id = None
         if main_account_info:
             logger.info(f"開始保存主帳號資訊，用戶ID: {user_id}")
-            main_account_id = await amazon_ads_service.save_main_account(user_id, main_account_info)
+            main_account_id = await amazon_ads_service.save_main_account(user_id, main_account_info, refresh_token)
             logger.info(f"主帳號資訊保存完成，ID: {main_account_id}")
         
         # 保存連接信息
@@ -366,7 +367,6 @@ async def refresh_token(
         raise HTTPException(status_code=404, detail="Connection not found")
     
     # 解密刷新令牌
-    from ...core.security import decrypt_token, encrypt_token
     refresh_token = decrypt_token(connection.refresh_token)
     
     try:
@@ -631,6 +631,5 @@ async def bulk_refresh_tokens(
         return result
     except Exception as e:
         logger.error(f"批量刷新令牌時出錯: {str(e)}")
-        import traceback
         logger.error(f"詳細錯誤信息: {traceback.format_exc()}")
         raise HTTPException(status_code=400, detail=f"Failed to bulk refresh tokens: {str(e)}")

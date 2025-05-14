@@ -4,8 +4,8 @@ from fastapi.openapi.docs import get_swagger_ui_html, get_redoc_html
 from fastapi.openapi.utils import get_openapi
 import logging
 
-from .api.routes.connections import router as connections_router
-from .api.routes.examples.campaigns import router as campaigns_examples_router
+# 導入所有路由
+from .api.routes import routers
 from .core.config import settings
 from .core.supabase import check_supabase_migrations, get_supabase_migrations
 
@@ -34,9 +34,9 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# 註冊路由
-app.include_router(connections_router, prefix=settings.API_V1_STR)
-app.include_router(campaigns_examples_router, prefix=settings.API_V1_STR)
+# 註冊所有路由
+for router in routers:
+    app.include_router(router, prefix=settings.API_V1_STR)
 
 @app.get("/")
 async def root():
@@ -102,9 +102,13 @@ def custom_openapi():
             }
         },
         {
-            "name": "examples",
-            "description": "API 使用示例"
-        }
+            "name": "amazon-ads-campaigns",
+            "description": "Amazon Ads 廣告活動管理與優化",
+            "externalDocs": {
+                "description": "文檔",
+                "url": "https://example.com/docs/amazon-ads-campaigns"
+            }
+        },
     ]
     
     app.openapi_schema = openapi_schema

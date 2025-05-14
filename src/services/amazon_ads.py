@@ -5,6 +5,8 @@ from datetime import datetime, timedelta
 from typing import Dict, Any, List, Optional, Tuple
 import os
 import logging
+import traceback
+import base64
 
 from ..core.config import settings
 from ..core.security import encrypt_token, decrypt_token
@@ -251,6 +253,12 @@ class AmazonAdsService:
         """
         logger.info("正在刷新訪問令牌...")
         
+        # === 調試 refresh_token ===
+        logger.info(f"Refresh Token 長度: {len(refresh_token)}")
+        logger.info(f"Refresh Token 前20個字符: {refresh_token[:20]}...")
+        logger.info(f"Refresh Token 後20個字符: ...{refresh_token[-20:]}")
+        # === 調試結束 ===
+        
         payload = {
             "grant_type": "refresh_token",
             "refresh_token": refresh_token,
@@ -264,6 +272,22 @@ class AmazonAdsService:
                 response.raise_for_status()
                 result = response.json()
                 logger.info("成功刷新訪問令牌")
+                
+                # === 調試返回的 token ===
+                if "access_token" in result:
+                    access_token = result["access_token"]
+                    logger.info(f"新的 Access Token 長度: {len(access_token)}")
+                    logger.info(f"新的 Access Token 前20個字符: {access_token[:20]}...")
+                    logger.info(f"新的 Access Token 後20個字符: ...{access_token[-20:]}")
+                    
+                    # 檢查是否是 Base64 格式
+                    try:
+                        decoded = base64.b64decode(access_token)
+                        logger.error(f"錯誤：返回的 access_token 是 Base64 編碼！這不對！")
+                        logger.error(f"解碼後的前50個字節: {repr(decoded[:50])}")
+                    except:
+                        logger.info("Access token 格式正常（不是 Base64）")
+                # === 調試結束 ===
                 
                 # 檢查是否返回了新的刷新令牌
                 if "refresh_token" in result:
@@ -387,13 +411,14 @@ class AmazonAdsService:
             logger.error(f"詳細錯誤信息: {traceback.format_exc()}")
             raise
             
-    async def save_main_account(self, user_id: str, main_account_info: Dict[str, Any]) -> int:
+    async def save_main_account(self, user_id: str, main_account_info: Dict[str, Any], refresh_token: Optional[str] = None) -> int:
         """
         保存主帳號信息到數據庫
         
         Args:
             user_id: 用戶 ID
             main_account_info: 主帳號信息
+            refresh_token: Amazon授權刷新令牌
             
         Returns:
             int: 主帳號記錄的 ID
@@ -403,13 +428,12 @@ class AmazonAdsService:
         amazon_user_id = main_account_info.get("user_id", "")
         email = main_account_info.get("email", "")
         name = main_account_info.get("name", "")
-        postal_code = main_account_info.get("postal_code", "")
         
         # 記錄要保存的主帳號信息
         logger.info(f"主帳號信息詳情:")
         logger.info(f"  - amazon_user_id: {amazon_user_id}")
         logger.info(f"  - name: {name}")
-        logger.info(f"  - postal_code: {postal_code}")
+        logger.info(f"  - email: {email}")
         
         if not supabase:
             logger.warning("無法保存主帳號信息：Supabase 客戶端不可用")
@@ -419,16 +443,31 @@ class AmazonAdsService:
             # 檢查是否已存在相同 amazon_user_id 的記錄
             existing_account = supabase.table('amazon_main_accounts').select('*').eq('amazon_user_id', amazon_user_id).execute()
             
+            # 如果提供了 refresh_token，則加密
+            encrypted_refresh_token = None
+            if refresh_token:
+                try:
+                    encrypted_refresh_token = encrypt_token(refresh_token)
+                    logger.info(f"已加密 refresh_token (加密前長度: {len(refresh_token)}, 加密後長度: {len(encrypted_refresh_token)})")
+                except Exception as e:
+                    logger.error(f"加密 refresh_token 時出錯: {str(e)}")
+                    logger.error(traceback.format_exc())
+                    encrypted_refresh_token = None
+            
             if existing_account and existing_account.data:
                 logger.info(f"找到已存在的主帳號記錄，ID={existing_account.data[0]['id']}")
                 
                 # 更新現有記錄
-                supabase.table('amazon_main_accounts').update({
+                update_data = {
                     'email': email,
                     'name': name,
-                    'postal_code': postal_code,
                     'updated_at': datetime.now().isoformat()
-                }).eq('id', existing_account.data[0]['id']).execute()
+                }
+                
+                if encrypted_refresh_token:
+                    update_data['refresh_token'] = encrypted_refresh_token
+                
+                supabase.table('amazon_main_accounts').update(update_data).eq('id', existing_account.data[0]['id']).execute()
                 
                 logger.info(f"已更新主帳號記錄")
                 return existing_account.data[0]['id']
@@ -436,15 +475,19 @@ class AmazonAdsService:
             else:
                 # 創建新記錄
                 logger.info(f"創建新的主帳號記錄")
-                result = supabase.table('amazon_main_accounts').insert({
+                insert_data = {
                     'user_id': user_id,
                     'amazon_user_id': amazon_user_id,
                     'email': email,
                     'name': name,
-                    'postal_code': postal_code,
                     'created_at': datetime.now().isoformat(),
                     'updated_at': datetime.now().isoformat()
-                }).execute()
+                }
+                
+                if encrypted_refresh_token:
+                    insert_data['refresh_token'] = encrypted_refresh_token
+                
+                result = supabase.table('amazon_main_accounts').insert(insert_data).execute()
                 
                 if result and result.data:
                     account_id = result.data[0]['id']
@@ -457,7 +500,6 @@ class AmazonAdsService:
         except Exception as e:
             logger.error(f"保存主帳號信息時出錯: {str(e)}")
             logger.error(f"詳細錯誤:")
-            import traceback
             logger.error(traceback.format_exc())
             return None
             
@@ -711,7 +753,6 @@ class AmazonAdsService:
             return connections
         except Exception as e:
             logger.error(f"獲取用戶連接時出錯: {str(e)}")
-            import traceback
             logger.error(f"詳細錯誤: {traceback.format_exc()}")
             return []
     
