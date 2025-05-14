@@ -524,6 +524,21 @@ class AmazonAdsService:
         marketplace_id = account_info.get("marketplaceStringId", "")
         account_name = account_info.get("name", "")
         account_type = account_info.get("type", "")
+        account_id = account_info.get("id", "")
+        valid_payment = account_info.get("validPaymentMethod", False)
+        
+        # 提取時區信息
+        timezone = profile.get("timezone", "")
+        
+        # 提取每日預算
+        daily_budget = profile.get("dailyBudget")
+        if daily_budget is not None:
+            # 處理科學計數法格式
+            try:
+                if isinstance(daily_budget, str) and "E" in daily_budget.upper():
+                    daily_budget = float(daily_budget)
+            except Exception as e:
+                logger.warning(f"轉換每日預算時出錯: {str(e)}")
         
         # 加密刷新令牌
         try:
@@ -544,7 +559,11 @@ class AmazonAdsService:
             account_type=account_type,
             refresh_token=encrypted_token,
             is_active=False,  # 新連接默認為禁用狀態
-            main_account_id=main_account_id  # 添加主帳號 ID
+            main_account_id=main_account_id,
+            timezone=timezone,
+            daily_budget=daily_budget,
+            account_id=account_id,
+            valid_payment=valid_payment
         )
         
         # 保存到 Supabase
@@ -558,7 +577,6 @@ class AmazonAdsService:
                     logger.warning(f"連接可能未成功保存，無返回數據")
             except Exception as e:
                 logger.error(f"保存連接時出錯: {str(e)}")
-                import traceback
                 logger.error(f"詳細錯誤: {traceback.format_exc()}")
         else:
             logger.warning("無法保存連接：Supabase 客戶端不可用")
@@ -647,6 +665,21 @@ class AmazonAdsService:
             marketplace_id = account_info.get("marketplaceStringId", "")
             account_name = account_info.get("name", "")
             account_type = account_info.get("type", "")
+            account_id = account_info.get("id", "")
+            valid_payment = account_info.get("validPaymentMethod", False)
+            
+            # 提取時區信息
+            timezone = profile.get("timezone", "")
+            
+            # 提取每日預算
+            daily_budget = profile.get("dailyBudget")
+            if daily_budget is not None:
+                # 處理科學計數法格式
+                try:
+                    if isinstance(daily_budget, str) and "E" in daily_budget.upper():
+                        daily_budget = float(daily_budget)
+                except Exception as e:
+                    logger.warning(f"轉換每日預算時出錯: {str(e)}")
             
             # 創建連接數據
             connection_dict = {
@@ -660,6 +693,10 @@ class AmazonAdsService:
                 'refresh_token': encrypted_token,
                 'is_active': False,  # 新連接默認為禁用狀態
                 'main_account_id': main_account_id,
+                'timezone': timezone,  # 添加時區
+                'daily_budget': daily_budget,  # 添加每日預算
+                'account_id': account_id,  # 添加賬號ID
+                'valid_payment': valid_payment,  # 添加支付方式有效性
                 'created_at': current_time,
                 'updated_at': current_time
             }

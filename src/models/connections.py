@@ -20,6 +20,10 @@ class AmazonAdsConnection:
         main_account_id: Optional[int] = None,
         main_account_name: Optional[str] = None,
         main_account_email: Optional[str] = None,
+        timezone: Optional[str] = None,
+        daily_budget: Optional[float] = None,
+        account_id: Optional[str] = None,
+        valid_payment: Optional[bool] = None,
         created_at: Optional[datetime] = None,
         updated_at: Optional[datetime] = None
     ):
@@ -36,6 +40,10 @@ class AmazonAdsConnection:
         self.main_account_id = main_account_id
         self.main_account_name = main_account_name
         self.main_account_email = main_account_email
+        self.timezone = timezone
+        self.daily_budget = daily_budget
+        self.account_id = account_id
+        self.valid_payment = valid_payment
         self.created_at = created_at or datetime.now()
         self.updated_at = updated_at or datetime.now()
     
@@ -72,6 +80,10 @@ class AmazonAdsConnection:
             main_account_id=data.get("main_account_id"),
             main_account_name=data.get("main_account_name"),
             main_account_email=data.get("main_account_email"),
+            timezone=data.get("timezone"),
+            daily_budget=data.get("daily_budget"),
+            account_id=data.get("account_id"),
+            valid_payment=data.get("valid_payment"),
             created_at=created_at,
             updated_at=updated_at
         )
@@ -94,6 +106,10 @@ class AmazonAdsConnection:
             'refresh_token': self.refresh_token,
             'is_active': self.is_active,
             'main_account_id': self.main_account_id,
+            'timezone': self.timezone,
+            'daily_budget': self.daily_budget,
+            'account_id': self.account_id,
+            'valid_payment': self.valid_payment,
             'created_at': self.created_at.isoformat() if isinstance(self.created_at, datetime) else self.created_at,
             'updated_at': self.updated_at.isoformat() if isinstance(self.updated_at, datetime) else self.updated_at
         }
