@@ -12,6 +12,7 @@ from ..core.config import settings
 from ..core.security import encrypt_token, decrypt_token
 from ..models.connections import AmazonAdsConnection
 from supabase import create_client, Client
+from contextlib import asynccontextmanager
 
 # 設定日誌
 logging.basicConfig(level=logging.INFO)
@@ -135,6 +136,17 @@ class AmazonAdsService:
         
         logger.info(f"AmazonAdsService 初始化完成，使用重定向 URL: {self.redirect_uri}")
     
+    @asynccontextmanager
+    async def httpx_client(self):
+        """
+        創建一個 HTTPX 異步客戶端的上下文管理器
+        
+        Returns:
+            AsyncContextManager: 異步客戶端上下文
+        """
+        async with httpx.AsyncClient(timeout=30.0) as client:
+            yield client
+    
     def generate_auth_url(self, user_id: str) -> Tuple[str, str]:
         """
         生成授權 URL
@@ -255,8 +267,7 @@ class AmazonAdsService:
         
         # === 調試 refresh_token ===
         logger.info(f"Refresh Token 長度: {len(refresh_token)}")
-        logger.info(f"Refresh Token 前20個字符: {refresh_token[:20]}...")
-        logger.info(f"Refresh Token 後20個字符: ...{refresh_token[-20:]}")
+        logger.info(f"Refresh Token 字符: {refresh_token[:20]}...{refresh_token[-20:]}")
         # === 調試結束 ===
         
         payload = {
@@ -277,16 +288,7 @@ class AmazonAdsService:
                 if "access_token" in result:
                     access_token = result["access_token"]
                     logger.info(f"新的 Access Token 長度: {len(access_token)}")
-                    logger.info(f"新的 Access Token 前20個字符: {access_token[:20]}...")
-                    logger.info(f"新的 Access Token 後20個字符: ...{access_token[-20:]}")
-                    
-                    # 檢查是否是 Base64 格式
-                    try:
-                        decoded = base64.b64decode(access_token)
-                        logger.error(f"錯誤：返回的 access_token 是 Base64 編碼！這不對！")
-                        logger.error(f"解碼後的前50個字節: {repr(decoded[:50])}")
-                    except:
-                        logger.info("Access token 格式正常（不是 Base64）")
+                    logger.info(f"新的 Access Token 字符: {access_token[:20]}...{access_token[-20:]}")
                 # === 調試結束 ===
                 
                 # 檢查是否返回了新的刷新令牌
