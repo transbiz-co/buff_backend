@@ -3,11 +3,13 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.openapi.docs import get_swagger_ui_html, get_redoc_html
 from fastapi.openapi.utils import get_openapi
 import logging
+from fastapi.responses import JSONResponse
+from datetime import datetime
 
 # 導入所有路由
 from .api.routes import routers
 from .core.config import settings
-from .core.supabase import check_supabase_migrations, get_supabase_migrations
+from .core.supabase import supabase
 
 # 設定日誌
 logging.basicConfig(
@@ -53,24 +55,36 @@ async def health_check():
     """
     健康檢查端點
     
-    檢查 API 服務和資料庫遷移狀態
+    簡單檢查 API 服務和資料庫連接狀態
     
     返回：
         dict: 系統狀態信息
     """
-    # 檢查遷移狀態
-    migrations_ok, migrations_message = check_supabase_migrations()
-    
-    # 獲取已應用的遷移列表
-    applied_migrations = get_supabase_migrations()
-    
-    return {
+    # 準備基本響應
+    response = {
         "status": "healthy",
-        "version": "0.1.0",
-        "migrations_ok": migrations_ok,
-        "migrations_message": migrations_message,
-        "applied_migrations_count": len(applied_migrations)
+        "api_time": datetime.now().isoformat()
     }
+    
+    # 檢查資料庫連接
+    if not supabase:
+        response["status"] = "unhealthy"
+        response["error"] = "Supabase client not initialized"
+        return JSONResponse(status_code=500, content=response)
+    
+    try:
+        # 嘗試執行簡單查詢，只要不報錯就表示連接正常
+        # 使用實際存在的表格執行最簡單的查詢
+        result = supabase.table('amazon_ads_connections').select('count').limit(1).execute()
+        
+        # 只要成功執行查詢，就表示資料庫連接正常
+        response["db_connected"] = True
+        return response
+    except Exception as e:
+        response["status"] = "unhealthy"
+        response["db_connected"] = False
+        response["error"] = str(e)
+        return JSONResponse(status_code=500, content=response)
 
 # 自定義 OpenAPI 規範
 def custom_openapi():
@@ -116,21 +130,9 @@ def custom_openapi():
 
 app.openapi = custom_openapi
 
-# 應用啟動時檢查遷移狀態
+# 應用啟動時事件
 @app.on_event("startup")
 async def startup_event():
     """應用啟動時執行的事件"""
     logger.info("應用啟動中...")
-    
-    # 檢查 Supabase 遷移狀態
-    migrations_ok, migrations_message = check_supabase_migrations()
-    if not migrations_ok:
-        logger.warning(f"遷移狀態檢查: {migrations_message}")
-    else:
-        logger.info(f"遷移狀態檢查: {migrations_message}")
-    
-    # 獲取已應用的遷移
-    migrations = get_supabase_migrations()
-    logger.info(f"已應用 {len(migrations)} 個遷移")
-    
-    logger.info("應用啟動完成")
+    logger.info("應用啟動完成") 
