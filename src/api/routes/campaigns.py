@@ -356,6 +356,7 @@ async def save_campaigns_to_db(profile_id: str, ad_type: str, campaigns: List[Di
                 # 取得 campaign ID (數據類型和命名可能不同)
                 campaign_id = None
                 
+                # TODO: 修正冗余判斷
                 if ad_type == "SP" or ad_type == "SB":
                     campaign_id = campaign.get("campaignId")
                 elif ad_type == "SD":
