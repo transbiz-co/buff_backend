@@ -337,3 +337,149 @@ async def sync_profile_reports(
         raise HTTPException(status_code=400, detail=combined_result["message"])
     
     return combined_result
+
+@router.post(
+    "/check",
+    summary="檢查報告狀態並處理",
+    description="""
+    檢查報告狀態並處理報告內容。
+    
+    - 如果提供了 report_id，則只檢查並處理該特定報告
+    - 如果未提供 report_id，則處理所有待處理的報告（狀態為 "COMPLETED" 但尚未下載的報告）
+    
+    處理後的報告將被上傳到 Supabase 存儲桶。
+    可以選擇性地指定用戶 ID 或配置檔案 ID 來限制檢查範圍。
+    
+    注意: 這是唯一的報告檢查 API，可以處理單個報告和批量報告。
+    """,
+    responses={
+        200: {
+            "description": "報告處理結果",
+            "content": {
+                "application/json": {
+                    "example": {
+                        "total_reports": 5,
+                        "processed_reports": 3,
+                        "failed_reports": 2,
+                        "details": [
+                            {
+                                "report_id": "12345678-1234-1234-1234-123456789012",
+                                "status": "COMPLETED",
+                                "download_status": "DOWNLOADED",
+                                "message": "報告已成功下載和處理"
+                            }
+                        ]
+                    }
+                }
+            }
+        },
+        404: {"description": "未找到報告"},
+        500: {"description": "處理報告時出錯"}
+    }
+)
+async def check_and_process_reports(
+    report_id: Optional[str] = Query(None, description="報告 ID，可選，若提供則只處理該特定報告"),
+    user_id: Optional[str] = Query(None, description="用戶 ID，可選，用於只處理特定用戶的報告"),
+    profile_id: Optional[str] = Query(None, description="Amazon Ads 配置檔案 ID，可選，用於只處理特定配置檔案的報告"),
+    limit: int = Query(20, description="處理的最大報告數量，默認為 20，僅在批量處理時有效")
+):
+    """
+    檢查報告狀態並處理
+    
+    參數:
+        report_id: 報告 ID，可選，若提供則只處理該特定報告
+        user_id: 用戶 ID，可選
+        profile_id: Amazon Ads 配置檔案 ID，可選
+        limit: 處理的最大報告數量，僅在批量處理時有效
+        
+    返回:
+        報告處理結果
+    """
+    # 如果提供了特定的 report_id，則只處理該報告
+    if report_id:
+        logger.info(f"檢查特定報告: {report_id}")
+        try:
+            # 調用服務方法檢查並下載報告
+            result = await amazon_ads_service.check_and_download_report(report_id)
+            
+            # 將單個報告結果包裝為一致的格式
+            return {
+                "total_reports": 1,
+                "processed_reports": 1 if result.get('download_status') == "DOWNLOADED" else 0,
+                "failed_reports": 0 if result.get('download_status') == "DOWNLOADED" else 1,
+                "details": [result]
+            }
+        except ValueError as e:
+            raise HTTPException(status_code=404, detail=str(e))
+        except Exception as e:
+            logger.error(f"檢查報告 {report_id} 時出錯: {str(e)}")
+            logger.error(traceback.format_exc())
+            raise HTTPException(status_code=500, detail=f"處理報告時出錯: {str(e)}")
+    
+    # 否則處理所有待處理的報告
+    else:
+        logger.info("開始檢查和處理待處理的報告")
+        
+        try:
+            # 構建查詢
+            query = supabase.table('amazon_ads_reports').select('*')
+            
+            # 僅選擇已完成但未下載的報告
+            query = query.eq('status', 'COMPLETED').eq('download_status', 'PENDING')
+            
+            # 如果指定了用戶 ID，則添加過濾條件
+            if user_id:
+                query = query.eq('user_id', user_id)
+                
+            # 如果指定了配置檔案 ID，則添加過濾條件
+            if profile_id:
+                query = query.eq('profile_id', profile_id)
+                
+            # 執行查詢
+            reports_result = query.limit(limit).execute()
+            pending_reports = reports_result.data
+            
+            # 處理結果
+            result = {
+                "total_reports": len(pending_reports),
+                "processed_reports": 0,
+                "failed_reports": 0,
+                "details": []
+            }
+            
+            # 處理每個報告
+            for report in pending_reports:
+                try:
+                    report_result = await amazon_ads_service.check_and_download_report(report['report_id'])
+                    
+                    # 更新計數
+                    if report_result.get('download_status') == "DOWNLOADED":
+                        result["processed_reports"] += 1
+                    else:
+                        result["failed_reports"] += 1
+                        
+                    # 添加詳細信息
+                    result["details"].append(report_result)
+                    
+                except Exception as e:
+                    logger.error(f"處理報告 {report['report_id']} 時出錯: {str(e)}")
+                    logger.error(traceback.format_exc())
+                    
+                    # 更新計數
+                    result["failed_reports"] += 1
+                    
+                    # 添加詳細信息
+                    result["details"].append({
+                        "report_id": report['report_id'],
+                        "status": report.get('status'),
+                        "download_status": "FAILED",
+                        "message": f"處理出錯: {str(e)}"
+                    })
+            
+            # 返回結果
+            return result
+            
+        except Exception as e:
+            logger.error(f"批量處理報告時出錯: {str(e)}")
+            logger.error(traceback.format_exc())
+            raise HTTPException(status_code=500, detail=f"批量處理報告時出錯: {str(e)}")

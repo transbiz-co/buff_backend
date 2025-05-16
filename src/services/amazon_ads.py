@@ -2,11 +2,14 @@ import httpx
 import json
 import uuid
 from datetime import datetime, timedelta
-from typing import Dict, Any, List, Optional, Tuple
+from typing import Dict, Any, List, Optional, Tuple, Union
 import os
 import logging
 import traceback
 import base64
+import gzip
+import io
+import json
 
 from ..core.config import settings
 from ..core.security import encrypt_token, decrypt_token
@@ -1522,6 +1525,248 @@ class AmazonAdsService:
             import traceback
             logger.error(f"詳細錯誤: {traceback.format_exc()}")
             return None
+
+    async def download_report(self, report_url: str) -> bytes:
+        """
+        下載 Amazon 廣告報告
+        
+        Args:
+            report_url: 報告下載 URL
+        
+        Returns:
+            bytes: 報告的原始字節數據
+        """
+        logger.info(f"正在下載報告: {report_url}")
+        
+        try:
+            async with self.httpx_client() as client:
+                response = await client.get(report_url)
+                response.raise_for_status()
+                logger.info(f"報告下載成功，大小: {len(response.content)} 字節")
+                return response.content
+        except Exception as e:
+            logger.error(f"下載報告時出錯: {str(e)}")
+            logger.error(traceback.format_exc())
+            raise
+
+    async def process_report_content(self, content: bytes) -> Dict[str, Any]:
+        """
+        處理報告內容 - 解壓並解析 GZIP_JSON 格式
+        
+        Args:
+            content: 報告的原始字節數據
+        
+        Returns:
+            Dict[str, Any]: 解析後的報告數據
+        """
+        logger.info("正在處理報告內容...")
+        
+        try:
+            # 解壓 GZIP
+            with gzip.GzipFile(fileobj=io.BytesIO(content), mode="rb") as f:
+                decompressed_content = f.read()
+            
+            logger.info(f"報告解壓成功，大小: {len(decompressed_content)} 字節")
+            
+            # 解析 JSON
+            parsed_data = json.loads(decompressed_content)
+            logger.info(f"報告解析成功，包含 {len(parsed_data) if isinstance(parsed_data, list) else '1'} 條記錄")
+            
+            return parsed_data
+        except Exception as e:
+            logger.error(f"處理報告內容時出錯: {str(e)}")
+            logger.error(traceback.format_exc())
+            raise
+
+    async def upload_report_to_supabase(
+        self, 
+        user_id: str, 
+        profile_id: str, 
+        ad_product: str, 
+        report_id: str, 
+        content: Union[bytes, Dict, List]
+    ) -> str:
+        """
+        將報告上傳到 Supabase 存儲桶
+        
+        Args:
+            user_id: 用戶 ID
+            profile_id: Amazon Ads 配置檔案 ID
+            ad_product: 廣告產品類型
+            report_id: 報告 ID
+            content: 報告內容 (字節、字典或列表)
+        
+        Returns:
+            str: Supabase 存儲路徑
+        """
+        logger.info(f"正在上傳報告到 Supabase: {report_id}")
+        
+        # 確定存儲路徑
+        storage_path = f"reports/{user_id}/{profile_id}/{ad_product}/{report_id}.json"
+        
+        try:
+            # 確保內容是 JSON 字符串
+            if isinstance(content, (dict, list)):
+                content_str = json.dumps(content)
+                content_bytes = content_str.encode('utf-8')
+            elif isinstance(content, bytes):
+                # 嘗試解析為 JSON 格式化輸出
+                try:
+                    parsed = json.loads(content.decode('utf-8'))
+                    content_str = json.dumps(parsed)
+                    content_bytes = content_str.encode('utf-8')
+                except:
+                    # 如果不是有效的 JSON，保持原樣
+                    content_bytes = content
+            else:
+                raise TypeError(f"不支持的內容類型: {type(content)}")
+            
+            # 檢查存儲桶是否存在，如不存在則創建
+            # TODO: 放到 .env 當中
+            bucket_name = "amazon-ads-data"
+            try:
+                buckets = supabase.storage.list_buckets()
+                bucket_exists = any(bucket.name == bucket_name for bucket in buckets)
+                
+                if not bucket_exists:
+                    logger.info(f"創建存儲桶: {bucket_name}")
+                    supabase.storage.create_bucket(bucket_name)
+            except Exception as bucket_error:
+                logger.warning(f"檢查或創建存儲桶時出錯: {str(bucket_error)}")
+                # 繼續嘗試上傳，可能存儲桶已經存在
+            
+            # 上傳到 Supabase
+            logger.info(f"開始上傳文件: {storage_path}")
+            result = supabase.storage.from_(bucket_name).upload(
+                path=storage_path,
+                file=content_bytes,
+                file_options={"content-type": "application/json", "upsert": "true"}
+            )
+            
+            logger.info(f"文件上傳成功: {storage_path}")
+            return storage_path
+        except Exception as e:
+            logger.error(f"上傳報告到 Supabase 時出錯: {str(e)}")
+            logger.error(traceback.format_exc())
+            raise
+
+    async def check_and_download_report(self, report_id: str) -> Dict[str, Any]:
+        """
+        檢查報告狀態，如果是 COMPLETED 則下載並處理
+        
+        Args:
+            report_id: 報告 ID
+        
+        Returns:
+            Dict[str, Any]: 報告處理結果
+        """
+        logger.info(f"檢查並下載報告: {report_id}")
+        
+        # 從數據庫獲取報告信息
+        report_query = supabase.table('amazon_ads_reports').select('*').eq('report_id', report_id).execute()
+        if not report_query.data:
+            logger.error(f"找不到報告: {report_id}")
+            raise ValueError(f"Report not found: {report_id}")
+        
+        report_record = report_query.data[0]
+        profile_id = report_record['profile_id']
+        user_id = report_record['user_id']
+        ad_product = report_record['ad_product']
+        
+        # 獲取連接信息
+        connection = await self.get_connection_by_profile_id(profile_id)
+        if not connection:
+            logger.error(f"找不到連接: {profile_id}")
+            raise ValueError(f"Connection not found: {profile_id}")
+        
+        # 解密刷新令牌
+        refresh_token = decrypt_token(connection.refresh_token)
+        
+        # 獲取訪問令牌
+        try:
+            token_response = await self.refresh_access_token(refresh_token)
+            access_token = token_response.get("access_token")
+            
+            if not access_token:
+                logger.error("無法獲取訪問令牌")
+                raise ValueError("Failed to get access token")
+        except Exception as e:
+            logger.error(f"獲取訪問令牌時出錯: {str(e)}")
+            logger.error(traceback.format_exc())
+            raise
+        
+        # 檢查報告狀態
+        status_data = await self.get_report_status(profile_id, access_token, report_id)
+        
+        result = {
+            "report_id": report_id,
+            "status": status_data.get("status"),
+            "download_status": report_record.get("download_status", "PENDING"),
+            "processed_status": report_record.get("processed_status", "PENDING"),
+            "message": ""
+        }
+        
+        # 如果報告已完成且未下載，則下載和處理
+        if status_data.get("status") == "COMPLETED" and status_data.get("url"):
+            # 如果已經下載過，跳過處理
+            if report_record.get("download_status") == "DOWNLOADED" and report_record.get("storage_path"):
+                result["message"] = "報告已下載過"
+                result["storage_path"] = report_record.get("storage_path")
+                return result
+                
+            try:
+                # 下載報告
+                report_content = await self.download_report(status_data.get("url"))
+                
+                # 處理報告內容
+                processed_data = await self.process_report_content(report_content)
+                
+                # 上傳到 Supabase
+                storage_path = await self.upload_report_to_supabase(
+                    user_id, profile_id, ad_product, report_id, processed_data
+                )
+                
+                # 更新數據庫記錄
+                update_data = {
+                    "download_status": "DOWNLOADED",
+                    "processed_status": "PROCESSED",
+                    "storage_path": storage_path,
+                    "updated_at": datetime.now().isoformat()
+                }
+                
+                supabase.table('amazon_ads_reports').update(update_data).eq('report_id', report_id).execute()
+                
+                result["download_status"] = "DOWNLOADED"
+                result["processed_status"] = "PROCESSED"
+                result["storage_path"] = storage_path
+                result["message"] = "報告已成功下載和處理"
+                
+                logger.info(f"報告 {report_id} 已成功下載和處理，存儲路徑: {storage_path}")
+                
+            except Exception as e:
+                error_msg = str(e)
+                logger.error(f"處理報告 {report_id} 時出錯: {error_msg}")
+                
+                # 更新數據庫記錄為失敗狀態
+                update_data = {
+                    "download_status": "FAILED",
+                    "failure_reason": error_msg,
+                    "updated_at": datetime.now().isoformat()
+                }
+                
+                supabase.table('amazon_ads_reports').update(update_data).eq('report_id', report_id).execute()
+                
+                result["download_status"] = "FAILED"
+                result["message"] = f"報告下載失敗: {error_msg}"
+        else:
+            # 報告尚未完成
+            if status_data.get("status") != "COMPLETED":
+                result["message"] = f"報告尚未完成，狀態: {status_data.get('status')}"
+            # 報告已完成但沒有 URL
+            elif not status_data.get("url"):
+                result["message"] = "報告已完成但沒有下載 URL"
+        
+        return result
 
 # 創建服務實例
 amazon_ads_service = AmazonAdsService()
