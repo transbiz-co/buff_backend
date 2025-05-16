@@ -340,106 +340,100 @@ async def save_campaigns_to_db(profile_id: str, ad_type: str, campaigns: List[Di
         logger.error("無法保存廣告活動: Supabase 客戶端不可用")
         return 0
     
-    saved_count = 0
+    # 定義用於處理不同廣告類型的設置的排除欄位
+    exclude_fields = {
+        "SP": ["campaignId", "name", "state", "startDate", "portfolioId"],
+        "SB": ["campaignId", "name", "state", "startDate", "portfolioId", "budget", "budgetType", "costType"],
+        "SD": ["campaignId", "name", "state", "startDate", "portfolioId", "budget", "budgetType", "costType", 
+               "budgettype", "costtype", "portfolioid"]  # 同時包含大小寫欄位名
+    }
     
-    # 批量處理, 每批最多 100 個廣告活動
+    # 欄位名稱映射 (用於處理 SD 的小寫欄位名稱)
+    field_mapping = {
+        "budgettype": "budgetType",
+        "costtype": "costType",
+        "portfolioid": "portfolioId"
+    }
+    
+    saved_count = 0
     batch_size = 100
     
     for i in range(0, len(campaigns), batch_size):
         batch = campaigns[i:min(i+batch_size, len(campaigns))]
+        batch_data = []
         
-        try:
-            # 為每個廣告活動準備資料
-            batch_data = []
+        for campaign in batch:
+            # 標準化欄位名稱 (特別是 SD 的小寫欄位)
+            if ad_type == "SD":
+                for old_key, new_key in field_mapping.items():
+                    if old_key in campaign and new_key not in campaign:
+                        campaign[new_key] = campaign.pop(old_key)
             
-            for campaign in batch:
-                # 取得 campaign ID (數據類型和命名可能不同)
-                campaign_id = None
-                
-                # TODO: 修正冗余判斷
-                if ad_type == "SP" or ad_type == "SB":
-                    campaign_id = campaign.get("campaignId")
-                elif ad_type == "SD":
-                    campaign_id = campaign.get("campaignId")
-                
-                if not campaign_id:
-                    logger.warning(f"跳過缺少 campaignId 的廣告活動")
-                    continue
-                
-                # 標準化日期格式
-                start_date = None
-                if ad_type == "SP" or ad_type == "SB":
-                    start_date = campaign.get("startDate")
-                elif ad_type == "SD":
-                    # SD 的日期格式為 YYYYMMDD
-                    raw_date = campaign.get("startDate")
-                    if raw_date and len(raw_date) == 8:
-                        start_date = f"{raw_date[:4]}-{raw_date[4:6]}-{raw_date[6:8]}"
-                
-                # 獲取狀態，並標準化為大寫
-                state = None
-                if "state" in campaign:
-                    state = campaign["state"].upper()
-                
-                # 獲取預算信息
-                budget = None
-                budget_type = None
-                
-                if ad_type == "SP":
-                    budget_data = campaign.get("budget", {})
-                    budget = budget_data.get("budget")
-                    budget_type = budget_data.get("budgetType")
-                else:  # SB 和 SD
-                    budget = campaign.get("budget")
-                    budget_type = campaign.get("budgetType")
-                
-                # 處理特定類型的設置
-                sp_settings = None
-                sb_settings = None
-                sd_settings = None
-                
-                if ad_type == "SP":
-                    # 複製 campaign 並移除標準欄位
-                    sp_settings = campaign.copy()
-                    for field in ["campaignId", "name", "state", "startDate", "portfolioId"]:
-                        if field in sp_settings:
-                            del sp_settings[field]
-                elif ad_type == "SB":
-                    # 複製 campaign 並移除標準欄位
-                    sb_settings = campaign.copy()
-                    for field in ["campaignId", "name", "state", "startDate", "portfolioId", "budget", "budgetType", "costType"]:
-                        if field in sb_settings:
-                            del sb_settings[field]
-                elif ad_type == "SD":
-                    # 複製 campaign 並移除標準欄位
-                    sd_settings = campaign.copy()
-                    for field in ["campaignId", "name", "state", "startDate", "portfolioId", "budget", "budgetType", "costType"]:
-                        if field in sd_settings:
-                            del sd_settings[field]
-                
-                # 準備待保存的數據
-                campaign_data = {
-                    "campaign_id": campaign_id,
-                    "ad_type": ad_type,
-                    "profile_id": profile_id,
-                    "name": campaign.get("name", ""),
-                    "state": state,
-                    "start_date": start_date,
-                    "budget": budget,
-                    "budget_type": budget_type,
-                    "cost_type": campaign.get("costType"),
-                    "portfolio_id": campaign.get("portfolioId"),
-                    "sp_settings": sp_settings,
-                    "sb_settings": sb_settings,
-                    "sd_settings": sd_settings,
-                    "sync_status": "SYNCED",
-                    "last_synced_at": datetime.now().isoformat()
-                }
-                
-                batch_data.append(campaign_data)
+            # 獲取 campaign ID
+            campaign_id = campaign.get("campaignId")
+            if not campaign_id:
+                logger.warning(f"跳過缺少 campaignId 的廣告活動")
+                continue
             
-            # 使用 UPSERT 批量保存廣告活動
-            if batch_data:
+            # 標準化日期格式
+            start_date = None
+            raw_date = campaign.get("startDate")
+            if raw_date:
+                # SD 的日期格式為 YYYYMMDD，需轉換為 YYYY-MM-DD
+                if ad_type == "SD" and len(raw_date) == 8:
+                    start_date = f"{raw_date[:4]}-{raw_date[4:6]}-{raw_date[6:8]}"
+                else:
+                    start_date = raw_date
+            
+            # 標準化狀態為大寫
+            state = campaign.get("state", "").upper() if campaign.get("state") else None
+            
+            # 獲取預算信息
+            budget = None
+            budget_type = None
+            
+            if ad_type == "SP":
+                # SP 的預算是一個物件，包含 budget 和 budgetType
+                budget_data = campaign.get("budget", {})
+                budget = budget_data.get("budget")
+                budget_type = budget_data.get("budgetType")
+            else:  # SB 和 SD
+                budget = campaign.get("budget")
+                budget_type = campaign.get("budgetType")
+            
+            # 創建廣告類型特定設置
+            settings = {"sp_settings": None, "sb_settings": None, "sd_settings": None}
+            settings_key = f"{ad_type.lower()}_settings"
+            
+            # 複製所有欄位，然後移除標準欄位
+            type_settings = campaign.copy()
+            for field in exclude_fields.get(ad_type, []):
+                type_settings.pop(field, None)
+            
+            settings[settings_key] = type_settings
+            
+            # 準備待保存的數據
+            campaign_data = {
+                "campaign_id": campaign_id,
+                "ad_type": ad_type,
+                "profile_id": profile_id,
+                "name": campaign.get("name", ""),
+                "state": state,
+                "start_date": start_date,
+                "budget": budget,
+                "budget_type": budget_type,
+                "cost_type": campaign.get("costType"),
+                "portfolio_id": campaign.get("portfolioId"),
+                **settings,  # 展開設置
+                "sync_status": "SYNCED",
+                "last_synced_at": datetime.now().isoformat()
+            }
+            
+            batch_data.append(campaign_data)
+        
+        # 使用 UPSERT 批量保存廣告活動
+        if batch_data:
+            try:
                 result = supabase.table('amazon_ads_campaigns').upsert(batch_data).execute()
                 
                 if result and result.data:
@@ -447,10 +441,9 @@ async def save_campaigns_to_db(profile_id: str, ad_type: str, campaigns: List[Di
                     logger.info(f"成功保存 {len(result.data)} 個廣告活動")
                 else:
                     logger.warning(f"批量保存廣告活動可能失敗, 響應: {result}")
-            
-        except Exception as e:
-            logger.error(f"保存批次廣告活動時出錯: {str(e)}")
-            logger.error(traceback.format_exc())
+            except Exception as e:
+                logger.error(f"保存批次廣告活動時出錯: {str(e)}")
+                logger.error(traceback.format_exc())
     
     logger.info(f"共保存 {saved_count} 個 {ad_type} 廣告活動")
     return saved_count 
