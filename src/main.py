@@ -102,7 +102,7 @@ def custom_openapi():
     # 添加伺服器資訊
     openapi_schema["servers"] = [
         {"url": "http://localhost:8000", "description": "開發環境"},
-        {"url": "https://api.example.com", "description": "生產環境"}
+        {"url": "https://buff-backend-oi2s.onrender.com", "description": "生產環境"}
     ]
     
     # 添加標籤說明
