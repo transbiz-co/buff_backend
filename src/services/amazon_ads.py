@@ -10,6 +10,7 @@ import base64
 import gzip
 import io
 import json
+import asyncio
 
 from ..core.config import settings
 from ..core.security import encrypt_token, decrypt_token
@@ -1045,6 +1046,19 @@ class AmazonAdsService:
         except Exception as e:
             logger.error(f"創建報告時出錯: {str(e)}")
             logger.error(traceback.format_exc())
+            if isinstance(e, httpx.HTTPStatusError):
+                logger.error(f"HTTP錯誤狀態碼: {e.response.status_code}")
+                logger.error(f"響應內容: {e.response.text}")
+                
+                if e.response.status_code == 400:
+                    error_message = f"Amazon API 返回錯誤 (400 Bad Request): {e.response.text}"
+                    raise ValueError(error_message)
+                elif e.response.status_code == 425:
+                    error_message = f"Amazon API 返回錯誤 (425 Too Early): 報告生成請求過早，請稍後再試"
+                    raise ValueError(error_message)
+                else:
+                    error_message = f"Amazon API 返回錯誤 ({e.response.status_code}): {e.response.text}"
+                    raise ValueError(error_message)
             raise
     
     def _get_report_columns(self, ad_product: str) -> List[str]:
@@ -1280,6 +1294,14 @@ class AmazonAdsService:
                         })
                         continue
                     
+                except ValueError as ve:
+                    error_message = str(ve)
+                    logger.error(f"為配置檔案 {profile_id} 創建報告時出錯: {error_message}")
+                    result_stats["failed_profiles"].append({
+                        "profile_id": profile_id,
+                        "error": f"Failed to create report: {error_message}"
+                    })
+                    continue
                 except Exception as e:
                     logger.error(f"為配置檔案 {profile_id} 創建報告時出錯: {str(e)}")
                     logger.error(traceback.format_exc())
@@ -1364,22 +1386,46 @@ class AmazonAdsService:
             
             try:
                 # 創建報告請求
-                report_data = await self.create_report(
-                    profile_id=profile_id,
-                    access_token=access_token,
-                    ad_product=ad_product,
-                    start_date=start_date,
-                    end_date=end_date,
-                    user_id=connection.user_id
-                )
+                retry_count = 0
+                max_retries = 3
+                retry_delay = 2  # 秒
                 
-                if report_data and report_data.get("reportId"):
-                    result_stats["created_reports"] = 1
-                    result_stats["message"] = f"Successfully created {ad_product} report"
-                    result_stats["report_id"] = report_data.get("reportId")
-                else:
-                    result_stats["success"] = False
-                    result_stats["message"] = f"Failed to create {ad_product} report"
+                while retry_count <= max_retries:
+                    try:
+                        report_data = await self.create_report(
+                            profile_id=profile_id,
+                            access_token=access_token,
+                            ad_product=ad_product,
+                            start_date=start_date,
+                            end_date=end_date,
+                            user_id=connection.user_id
+                        )
+                        
+                        if report_data and report_data.get("reportId"):
+                            result_stats["created_reports"] = 1
+                            result_stats["message"] = f"Successfully created {ad_product} report"
+                            result_stats["report_id"] = report_data.get("reportId")
+                            break  # 成功創建報告，退出重試循環
+                        else:
+                            result_stats["success"] = False
+                            result_stats["message"] = f"Failed to create {ad_product} report"
+                            break  # 沒有獲取到報告ID，退出重試循環
+                    except ValueError as ve:
+                        error_message = str(ve)
+                        if "425 Too Early" in error_message and retry_count < max_retries:
+                            retry_count += 1
+                            logger.warning(f"獲取到 425 Too Early 錯誤，將進行第 {retry_count} 次重試（共 {max_retries} 次）")
+                            await asyncio.sleep(retry_delay * retry_count)  # 指數退避策略
+                            continue
+                        else:
+                            result_stats["success"] = False
+                            result_stats["message"] = error_message
+                            break
+                    except Exception as e:
+                        logger.error(f"為配置檔案 {profile_id} 創建 {ad_product} 報告時出錯: {str(e)}")
+                        result_stats["success"] = False
+                        result_stats["message"] = str(e)
+                        break
             except Exception as e:
                 logger.error(f"為配置檔案 {profile_id} 創建 {ad_product} 報告時出錯: {str(e)}")
                 result_stats["success"] = False
