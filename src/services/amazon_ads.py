@@ -1468,50 +1468,92 @@ class AmazonAdsService:
                             
                             if supabase and duplicate_report_id:
                                 try:
-                                    existing_report = supabase.table('amazon_ads_reports').select('*').eq('report_id', duplicate_report_id).execute()
+                                    report_type_id = self._get_report_type_id(ad_product)
+                                    existing_report_by_constraint = supabase.table('amazon_ads_reports').select('*').eq('profile_id', profile_id).eq('ad_product', ad_product).eq('start_date', start_date).eq('end_date', end_date).eq('report_type_id', report_type_id).execute()
                                     
-                                    if existing_report.data:
-                                        logger.info(f"資料庫中已有重複報告記錄: {duplicate_report_id}")
+                                    if existing_report_by_constraint.data:
+                                        existing_report_id = existing_report_by_constraint.data[0].get("report_id")
+                                        logger.info(f"資料庫中已有相同條件的報告記錄: {existing_report_id}")
+                                        
+                                        if existing_report_id != duplicate_report_id:
+                                            logger.info(f"更新現有報告的 report_id: {existing_report_id} -> {duplicate_report_id}")
+                                            try:
+                                                update_result = supabase.table('amazon_ads_reports').update({"report_id": duplicate_report_id, "updated_at": datetime.now().isoformat()}).eq('report_id', existing_report_id).execute()
+                                                logger.info(f"成功更新報告 ID: {duplicate_report_id}")
+                                            except Exception as update_error:
+                                                logger.error(f"更新報告 ID 時出錯: {str(update_error)}")
+                                        
                                         result_stats["created_reports"] = 1
-                                        result_stats["message"] = f"Report already exists in database: {duplicate_report_id}"
+                                        result_stats["message"] = f"Report with same constraints already exists in database: {duplicate_report_id}"
                                         result_stats["report_id"] = duplicate_report_id
                                     else:
-                                        logger.info(f"資料庫中沒有重複報告記錄，創建新記錄: {duplicate_report_id}")
+                                        existing_report = supabase.table('amazon_ads_reports').select('*').eq('report_id', duplicate_report_id).execute()
                                         
-                                        report_record = {
-                                            "report_id": duplicate_report_id,
-                                            "user_id": connection.user_id,
-                                            "profile_id": profile_id,
-                                            "name": f"{ad_product} report {start_date} to {end_date} for Profile {profile_id} (from 425 error)",
-                                            "status": "PENDING",  # 假設狀態為 PENDING
-                                            "ad_product": ad_product,
-                                            "report_type_id": self._get_report_type_id(ad_product),
-                                            "start_date": start_date,
-                                            "end_date": end_date,
-                                            "time_unit": "DAILY",
-                                            "format": "GZIP_JSON",
-                                            "configuration": {
-                                                "adProduct": ad_product,
-                                                "groupBy": ["campaign"],
-                                                "columns": self._get_report_columns(ad_product),
-                                                "reportTypeId": self._get_report_type_id(ad_product),
-                                                "timeUnit": "DAILY",
-                                                "format": "GZIP_JSON"
-                                            },
-                                            "created_at": datetime.now().isoformat(),
-                                            "updated_at": datetime.now().isoformat()
-                                        }
-                                        
-                                        try:
-                                            insert_result = supabase.table('amazon_ads_reports').insert(report_record).execute()
-                                            logger.info(f"成功將重複報告記錄保存到資料庫: {duplicate_report_id}")
+                                        if existing_report.data:
+                                            logger.info(f"資料庫中已有重複報告記錄: {duplicate_report_id}")
                                             result_stats["created_reports"] = 1
-                                            result_stats["message"] = f"Saved duplicate report to database: {duplicate_report_id}"
+                                            result_stats["message"] = f"Report already exists in database: {duplicate_report_id}"
                                             result_stats["report_id"] = duplicate_report_id
-                                        except Exception as db_error:
-                                            logger.error(f"保存重複報告記錄到資料庫時出錯: {str(db_error)}")
-                                            result_stats["success"] = False
-                                            result_stats["message"] = f"Failed to save duplicate report to database: {str(db_error)}"
+                                        else:
+                                            logger.info(f"資料庫中沒有重複報告記錄，創建新記錄: {duplicate_report_id}")
+                                            
+                                            report_record = {
+                                                "report_id": duplicate_report_id,
+                                                "user_id": connection.user_id,
+                                                "profile_id": profile_id,
+                                                "name": f"{ad_product} report {start_date} to {end_date} for Profile {profile_id} (from 425 error)",
+                                                "status": "PENDING",  # 假設狀態為 PENDING
+                                                "ad_product": ad_product,
+                                                "report_type_id": report_type_id,
+                                                "start_date": start_date,
+                                                "end_date": end_date,
+                                                "time_unit": "DAILY",
+                                                "format": "GZIP_JSON",
+                                                "configuration": {
+                                                    "adProduct": ad_product,
+                                                    "groupBy": ["campaign"],
+                                                    "columns": self._get_report_columns(ad_product),
+                                                    "reportTypeId": report_type_id,
+                                                    "timeUnit": "DAILY",
+                                                    "format": "GZIP_JSON"
+                                                },
+                                                "created_at": datetime.now().isoformat(),
+                                                "updated_at": datetime.now().isoformat()
+                                            }
+                                            
+                                            try:
+                                                insert_result = supabase.table('amazon_ads_reports').insert(report_record).execute()
+                                                logger.info(f"成功將重複報告記錄保存到資料庫: {duplicate_report_id}")
+                                                result_stats["created_reports"] = 1
+                                                result_stats["message"] = f"Saved duplicate report to database: {duplicate_report_id}"
+                                                result_stats["report_id"] = duplicate_report_id
+                                            except APIError as db_error:
+                                                if hasattr(db_error, 'code') and db_error.code == '23505' and 'amazon_ads_reports_unique_profile_report' in str(db_error):
+                                                    logger.warning(f"嘗試插入報告時發生唯一約束衝突，重新查詢現有報告")
+                                                    try:
+                                                        retry_query = supabase.table('amazon_ads_reports').select('*').eq('profile_id', profile_id).eq('ad_product', ad_product).eq('start_date', start_date).eq('end_date', end_date).eq('report_type_id', report_type_id).execute()
+                                                        if retry_query.data:
+                                                            existing_id = retry_query.data[0].get("report_id")
+                                                            logger.info(f"找到現有報告: {existing_id}")
+                                                            result_stats["created_reports"] = 1
+                                                            result_stats["message"] = f"Found existing report after constraint conflict: {existing_id}"
+                                                            result_stats["report_id"] = existing_id
+                                                        else:
+                                                            logger.error(f"唯一約束衝突後無法找到現有報告")
+                                                            result_stats["success"] = False
+                                                            result_stats["message"] = "Unique constraint conflict but could not find existing report"
+                                                    except Exception as retry_error:
+                                                        logger.error(f"重新查詢現有報告時出錯: {str(retry_error)}")
+                                                        result_stats["success"] = False
+                                                        result_stats["message"] = f"Error querying existing report after constraint conflict: {str(retry_error)}"
+                                                else:
+                                                    logger.error(f"保存重複報告記錄到資料庫時出錯: {str(db_error)}")
+                                                    result_stats["success"] = False
+                                                    result_stats["message"] = f"Failed to save duplicate report to database: {str(db_error)}"
+                                            except Exception as db_error:
+                                                logger.error(f"保存重複報告記錄到資料庫時出錯: {str(db_error)}")
+                                                result_stats["success"] = False
+                                                result_stats["message"] = f"Failed to save duplicate report to database: {str(db_error)}"
                                 except Exception as db_query_error:
                                     logger.error(f"查詢重複報告記錄時出錯: {str(db_query_error)}")
                                     result_stats["success"] = False
