@@ -16,6 +16,7 @@ from ..core.config import settings
 from ..core.security import encrypt_token, decrypt_token
 from ..models.connections import AmazonAdsConnection
 from supabase import create_client, Client
+from postgrest.exceptions import APIError
 from contextlib import asynccontextmanager
 
 # 設定日誌
@@ -1038,6 +1039,22 @@ class AmazonAdsService:
                         
                         result = supabase.table('amazon_ads_reports').insert(report_record).execute()
                         logger.info(f"報告信息已保存到數據庫: {report_data.get('reportId')}")
+                    except APIError as db_error:
+                        if hasattr(db_error, 'code') and db_error.code == '23505' and 'amazon_ads_reports_unique_profile_report' in str(db_error):
+                            logger.warning(f"報告已存在，跳過插入: profile_id={profile_id}, ad_product={ad_product}, start_date={start_date}, end_date={end_date}")
+                            
+                            try:
+                                existing_report = supabase.table('amazon_ads_reports').select('*').eq('profile_id', profile_id).eq('ad_product', ad_product).eq('start_date', start_date).eq('end_date', end_date).eq('report_type_id', report_type_id).execute()
+                                if existing_report.data:
+                                    report_data["reportId"] = existing_report.data[0].get("report_id")
+                                    logger.info(f"找到現有報告: report_id={report_data['reportId']}")
+                            except Exception as query_error:
+                                logger.error(f"查詢現有報告時出錯: {str(query_error)}")
+                            
+                            return report_data
+                        else:
+                            logger.error(f"保存報告信息到數據庫時出錯: {str(db_error)}")
+                            logger.error(traceback.format_exc())
                     except Exception as db_error:
                         logger.error(f"保存報告信息到數據庫時出錯: {str(db_error)}")
                         logger.error(traceback.format_exc())
