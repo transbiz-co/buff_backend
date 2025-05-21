@@ -483,3 +483,247 @@ async def check_and_process_reports(
             logger.error(f"批量處理報告時出錯: {str(e)}")
             logger.error(traceback.format_exc())
             raise HTTPException(status_code=500, detail=f"批量處理報告時出錯: {str(e)}")
+
+@router.post(
+    "/sync/amazon/advertising/reporting/campaign/reports",
+    summary="申請廣告活動報告",
+    description="""
+    申請 Amazon 廣告活動報告。
+    
+    此 API 可以根據不同參數組合申請廣告報告：
+    - 若提供 profile_id，則使用該 profile 申請指定的 ad_product campaign report
+    - 若提供 user_id，則透過 user_id 找到 public.amazon_ads_connections 底下所有 profile，逐個申請指定的 ad_product campaign report
+    - 若未提供 ad_product 參數，則 SP, SB, SD report 都要申請
+    
+    報告資料將存入 public.amazon_ads_reports 表。
+    """,
+    responses={
+        200: {
+            "description": "申請操作結果",
+            "content": {
+                "application/json": {
+                    "example": {
+                        "success": True,
+                        "total_profiles": 5,
+                        "processed_profiles": 5,
+                        "created_reports": 120,
+                        "message": "Successfully created 120 reports from 5 profiles",
+                        "details": {
+                            "SPONSORED_PRODUCTS": {
+                                "success": True,
+                                "created_reports": 50
+                            },
+                            "SPONSORED_BRANDS": {
+                                "success": True,
+                                "created_reports": 40
+                            },
+                            "SPONSORED_DISPLAY": {
+                                "success": True,
+                                "created_reports": 30
+                            }
+                        }
+                    }
+                }
+            }
+        },
+        400: {"description": "申請失敗"},
+        404: {"description": "未找到用戶或連接檔案"}
+    }
+)
+async def sync_amazon_advertising_campaign_reports(
+    start_date: str = Query(..., description="報告開始日期 (YYYY-MM-DD)"),
+    end_date: str = Query(..., description="報告結束日期 (YYYY-MM-DD)"),
+    user_id: Optional[str] = Query(None, description="用戶 ID，若提供則為該用戶的所有 profile 申請報告"),
+    profile_id: Optional[str] = Query(None, description="Amazon Ads 配置檔案 ID，若提供則為該 profile 申請報告"),
+    ad_product: Optional[str] = Query(None, description="廣告產品類型 (SPONSORED_PRODUCTS, SPONSORED_BRANDS, SPONSORED_DISPLAY)，不指定則生成所有類型報告")
+):
+    """
+    申請 Amazon 廣告活動報告
+    
+    參數:
+        start_date: 報告開始日期 (YYYY-MM-DD)
+        end_date: 報告結束日期 (YYYY-MM-DD)
+        user_id: 用戶 ID，選填
+        profile_id: Amazon Ads 配置檔案 ID，選填
+        ad_product: 廣告產品類型，不指定則生成所有類型報告
+        
+    返回:
+        申請操作結果，包括創建的報告數量和各類型的詳細信息
+    """
+    logger.info(f"開始申請廣告活動報告 start_date={start_date}, end_date={end_date}, user_id={user_id}, profile_id={profile_id}, ad_product={ad_product}")
+    
+    if not user_id and not profile_id:
+        logger.warning("未提供 user_id 或 profile_id")
+        raise HTTPException(status_code=400, detail="必須提供 user_id 或 profile_id 參數")
+    
+    try:
+        datetime.strptime(start_date, "%Y-%m-%d")
+        datetime.strptime(end_date, "%Y-%m-%d")
+    except ValueError as e:
+        logger.warning(f"日期格式錯誤: {str(e)}")
+        raise HTTPException(status_code=400, detail=f"日期格式錯誤: {str(e)}")
+    
+    # 如果未指定廣告產品類型，則處理所有類型
+    ad_product_types = ["SPONSORED_PRODUCTS", "SPONSORED_BRANDS", "SPONSORED_DISPLAY"]
+    
+    if ad_product:
+        # 如果指定了特定類型，只處理該類型
+        if ad_product in ad_product_types:
+            ad_product_types = [ad_product]
+        else:
+            logger.warning(f"無效的廣告產品類型: {ad_product}")
+            raise HTTPException(status_code=400, detail=f"Invalid ad_product: {ad_product}")
+    
+    # 用於存儲所有類型的結果
+    combined_result = {
+        "success": False,
+        "processed_profiles": 0,
+        "created_reports": 0,
+        "details": {},
+        "failed_profiles": []
+    }
+    
+    at_least_one_success = False
+    
+    if profile_id:
+        logger.info(f"使用 profile_id={profile_id} 申請報告")
+        
+        combined_result["profile_id"] = profile_id
+        
+        # 處理每種廣告產品類型
+        for product_type in ad_product_types:
+            logger.info(f"處理廣告產品類型: {product_type}")
+            
+            try:
+                # 調用服務方法創建報告
+                result = await amazon_ads_service.create_profile_reports(
+                    profile_id=profile_id,
+                    ad_product=product_type,
+                    start_date=start_date,
+                    end_date=end_date
+                )
+                
+                # 記錄詳細結果
+                combined_result["details"][product_type] = {
+                    "success": result.get("success", False),
+                    "created_reports": result.get("created_reports", 0),
+                    "message": result.get("message", "")
+                }
+                
+                # 如果至少有一種類型成功，則整體結果為成功
+                if result.get("success", False):
+                    at_least_one_success = True
+                    
+                # 更新合計數據
+                combined_result["processed_profiles"] += (1 if result.get("success", False) else 0)
+                combined_result["created_reports"] += result.get("created_reports", 0)
+                
+            except Exception as e:
+                logger.error(f"處理 {product_type} 時出錯: {str(e)}")
+                logger.error(traceback.format_exc())
+                
+                # 記錄錯誤
+                combined_result["details"][product_type] = {
+                    "success": False,
+                    "created_reports": 0,
+                    "message": f"Error: {str(e)}"
+                }
+    
+    if user_id:
+        logger.info(f"使用 user_id={user_id} 申請報告")
+        
+        combined_result["user_id"] = user_id
+        user_result_stats = {
+            "total_profiles": 0,
+            "processed_profiles": 0
+        }
+        
+        # 處理每種廣告產品類型
+        for product_type in ad_product_types:
+            logger.info(f"處理廣告產品類型: {product_type}")
+            
+            try:
+                # 調用服務方法批量創建報告
+                result = await amazon_ads_service.bulk_create_reports(
+                    user_id=user_id,
+                    ad_product=product_type,
+                    start_date=start_date,
+                    end_date=end_date
+                )
+                
+                # 記錄詳細結果
+                combined_result["details"][product_type] = {
+                    "success": result.get("success", False),
+                    "created_reports": result.get("created_reports", 0),
+                    "message": result.get("message", "")
+                }
+                
+                # 如果至少有一種類型成功，則整體結果為成功
+                if result.get("success", False):
+                    at_least_one_success = True
+                    
+                # 更新合計數據
+                user_result_stats["total_profiles"] = max(user_result_stats["total_profiles"], result.get("total_profiles", 0))
+                user_result_stats["processed_profiles"] += result.get("processed_profiles", 0)
+                combined_result["created_reports"] += result.get("created_reports", 0)
+                
+                # 合併失敗的配置檔案
+                if "failed_profiles" in result:
+                    combined_result["failed_profiles"].extend(result["failed_profiles"])
+                
+            except Exception as e:
+                logger.error(f"處理 {product_type} 時出錯: {str(e)}")
+                logger.error(traceback.format_exc())
+                
+                # 記錄錯誤
+                combined_result["details"][product_type] = {
+                    "success": False,
+                    "created_reports": 0,
+                    "message": f"Error: {str(e)}"
+                }
+        
+        combined_result["total_profiles"] = user_result_stats["total_profiles"]
+        combined_result["processed_profiles"] += user_result_stats["processed_profiles"]
+    
+    # 設置整體結果的成功狀態
+    combined_result["success"] = at_least_one_success
+    
+    # 創建摘要信息
+    if combined_result["created_reports"] > 0:
+        if profile_id and user_id:
+            combined_result["message"] = (
+                f"Successfully created {combined_result['created_reports']} reports "
+                f"from {combined_result['processed_profiles']} profiles "
+                f"across {len([t for t, r in combined_result['details'].items() if r['success']])} ad types"
+            )
+        elif profile_id:
+            combined_result["message"] = (
+                f"Successfully created {combined_result['created_reports']} reports "
+                f"across {len([t for t, r in combined_result['details'].items() if r['success']])} ad types"
+            )
+        else:  # user_id
+            combined_result["message"] = (
+                f"Successfully created {combined_result['created_reports']} reports "
+                f"from {combined_result['processed_profiles']} of {combined_result['total_profiles']} profiles "
+                f"across {len([t for t, r in combined_result['details'].items() if r['success']])} ad types"
+            )
+    else:
+        combined_result["message"] = "No reports were created"
+    
+    # 檢查是否有錯誤條件
+    if not at_least_one_success:
+        logger.warning(f"申請報告失敗: {combined_result['message']}")
+        
+        if profile_id:
+            for product_type, result in combined_result["details"].items():
+                if "Connection not found" in result.get("message", ""):
+                    raise HTTPException(status_code=404, detail="Connection not found for this profile")
+        else:  # user_id
+            for product_type, result in combined_result["details"].items():
+                if "No Amazon Ads connections found" in result.get("message", ""):
+                    raise HTTPException(status_code=404, detail="No Amazon Ads connections found for this user")
+        
+        # 其他錯誤返回400
+        raise HTTPException(status_code=400, detail=combined_result["message"])
+    
+    return combined_result
