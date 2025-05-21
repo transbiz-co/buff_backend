@@ -552,9 +552,6 @@ async def sync_amazon_advertising_campaign_reports(
     """
     logger.info(f"開始申請廣告活動報告 start_date={start_date}, end_date={end_date}, user_id={user_id}, profile_id={profile_id}, ad_product={ad_product}")
     
-    if not user_id and not profile_id:
-        logger.warning("未提供 user_id 或 profile_id")
-        raise HTTPException(status_code=400, detail="必須提供 user_id 或 profile_id 參數")
     
     try:
         datetime.strptime(start_date, "%Y-%m-%d")
@@ -585,7 +582,86 @@ async def sync_amazon_advertising_campaign_reports(
     
     at_least_one_success = False
     
-    if profile_id:
+    if not user_id and not profile_id:
+        logger.info("未提供 user_id 或 profile_id，使用所有 profiles")
+        
+        all_connections = await amazon_ads_service.get_all_connections()
+        
+        if not all_connections:
+            logger.warning("未找到任何 Amazon Ads 連接")
+            raise HTTPException(status_code=404, detail="No Amazon Ads connections found")
+        
+        logger.info(f"找到 {len(all_connections)} 個 Amazon Ads 連接")
+        
+        all_profiles_stats = {
+            "total_profiles": len(all_connections),
+            "processed_profiles": 0
+        }
+        
+        # 處理每種廣告產品類型
+        for product_type in ad_product_types:
+            logger.info(f"處理廣告產品類型: {product_type}")
+            
+            product_result = {
+                "success": False,
+                "created_reports": 0,
+                "processed_profiles": 0,
+                "failed_profiles": []
+            }
+            
+            for connection in all_connections:
+                profile_id = connection.profile_id
+                logger.info(f"處理 profile_id={profile_id}")
+                
+                try:
+                    # 調用服務方法創建報告
+                    result = await amazon_ads_service.create_profile_reports(
+                        profile_id=profile_id,
+                        ad_product=product_type,
+                        start_date=start_date,
+                        end_date=end_date
+                    )
+                    
+                    if result.get("success", False):
+                        product_result["processed_profiles"] += 1
+                        product_result["created_reports"] += result.get("created_reports", 0)
+                    else:
+                        product_result["failed_profiles"].append({
+                            "profile_id": profile_id,
+                            "message": result.get("message", "Unknown error")
+                        })
+                    
+                except Exception as e:
+                    logger.error(f"處理 profile_id={profile_id}, product_type={product_type} 時出錯: {str(e)}")
+                    logger.error(traceback.format_exc())
+                    
+                    product_result["failed_profiles"].append({
+                        "profile_id": profile_id,
+                        "message": str(e)
+                    })
+            
+            product_result["success"] = product_result["processed_profiles"] > 0
+            
+            # 如果至少有一個 profile 成功，則整體結果為成功
+            if product_result["success"]:
+                at_least_one_success = True
+            
+            # 更新合計數據
+            all_profiles_stats["processed_profiles"] += product_result["processed_profiles"]
+            combined_result["created_reports"] += product_result["created_reports"]
+            combined_result["failed_profiles"].extend(product_result["failed_profiles"])
+            
+            # 記錄詳細結果
+            combined_result["details"][product_type] = {
+                "success": product_result["success"],
+                "created_reports": product_result["created_reports"],
+                "message": f"Processed {product_result['processed_profiles']} of {len(all_connections)} profiles"
+            }
+        
+        combined_result["total_profiles"] = all_profiles_stats["total_profiles"]
+        combined_result["processed_profiles"] = all_profiles_stats["processed_profiles"]
+    
+    elif profile_id:
         logger.info(f"使用 profile_id={profile_id} 申請報告")
         
         combined_result["profile_id"] = profile_id
@@ -701,7 +777,13 @@ async def sync_amazon_advertising_campaign_reports(
                 f"Successfully created {combined_result['created_reports']} reports "
                 f"across {len([t for t, r in combined_result['details'].items() if r['success']])} ad types"
             )
-        else:  # user_id
+        elif user_id:
+            combined_result["message"] = (
+                f"Successfully created {combined_result['created_reports']} reports "
+                f"from {combined_result['processed_profiles']} of {combined_result['total_profiles']} profiles "
+                f"across {len([t for t, r in combined_result['details'].items() if r['success']])} ad types"
+            )
+        else:  # 所有 profiles
             combined_result["message"] = (
                 f"Successfully created {combined_result['created_reports']} reports "
                 f"from {combined_result['processed_profiles']} of {combined_result['total_profiles']} profiles "

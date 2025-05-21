@@ -750,6 +750,51 @@ class AmazonAdsService:
         logger.info(f"批量保存完成，共保存 {total_saved}/{len(connections_data)} 個新連接")
         return total_saved
     
+    async def get_all_connections(self) -> List[AmazonAdsConnection]:
+        """
+        獲取所有 Amazon Ads 連接，使用外鍵關聯一次性獲取主帳號信息
+        
+        Returns:
+            List[AmazonAdsConnection]: 連接列表
+        """
+        logger.info("正在獲取所有 Amazon Ads 連接")
+        
+        if not supabase:
+            logger.warning("無法獲取連接：Supabase 客戶端不可用")
+            return []
+        
+        try:
+            # 使用外鍵關聯語法一次性獲取所有數據，避免N+1查詢問題
+            result = supabase.table('amazon_ads_connections').select("""
+                *,
+                amazon_main_accounts!main_account_id (
+                    id,
+                    name,
+                    email
+                )
+            """).execute()
+            
+            # 處理結果
+            connections = []
+            for item in result.data:
+                conn_data = dict(item)
+                # 從嵌套數據中提取主帳號信息
+                main_account = conn_data.pop('amazon_main_accounts', None)
+                if main_account:
+                    conn_data['main_account_name'] = main_account.get('name')
+                    conn_data['main_account_email'] = main_account.get('email')
+                
+                # 創建連接對象
+                connection = AmazonAdsConnection.from_dict(conn_data)
+                connections.append(connection)
+            
+            logger.info(f"成功獲取 {len(connections)} 個連接（使用外鍵關聯查詢）")
+            return connections
+        except Exception as e:
+            logger.error(f"獲取所有連接時出錯: {str(e)}")
+            logger.error(f"詳細錯誤: {traceback.format_exc()}")
+            return []
+            
     async def get_user_connections(self, user_id: str) -> List[AmazonAdsConnection]:
         """
         獲取用戶的 Amazon Ads 連接，使用外鍵關聯一次性獲取主帳號信息
