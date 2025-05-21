@@ -1061,12 +1061,11 @@ class AmazonAdsService:
                 
                 return report_data
         except Exception as e:
-            logger.error(f"創建報告時出錯: {str(e)}")
-            logger.error(traceback.format_exc())
             if isinstance(e, httpx.HTTPStatusError):
-                logger.error(f"HTTP錯誤狀態碼: {e.response.status_code}")
-                logger.error(f"響應內容: {e.response.text}")
+                status_code = e.response.status_code
+                response_text = e.response.text
                 
+<<<<<<< HEAD
                 if e.response.status_code == 400:
                     error_message = f"Amazon API 返回錯誤 (400 Bad Request): {e.response.text}"
                     raise ValueError(error_message)
@@ -1087,14 +1086,45 @@ class AmazonAdsService:
                         logger.error(f"從 425 錯誤響應中提取報告 ID 時出錯: {str(extract_error)}")
                     
                     error_message = f"Amazon API 返回錯誤 (425 Duplicate Request): 報告請求重複"
+=======
+                if status_code == 400:
+                    logger.error(f"Amazon API 請求無效 (400 Bad Request): {response_text}")
+                    error_message = f"Amazon API 返回錯誤 (400 Bad Request): {response_text}"
+                    raise ValueError(error_message)
+                    
+                elif status_code == 425:
+                    logger.info(f"檢測到重複報告請求 (425): {response_text}")
+                    
+                    duplicate_report_id = None
+                    try:
+                        error_response = json.loads(response_text)
+                        if "detail" in error_response:
+                            detail = error_response["detail"]
+                            logger.info(f"重複報告詳情: {detail}")
+                            
+                            if "duplicate of :" in detail:
+                                duplicate_report_id = detail.split("duplicate of :")[1].strip()
+                                logger.info(f"重複報告 ID: {duplicate_report_id}")
+                    except Exception as extract_error:
+                        logger.info(f"無法從響應中提取報告 ID: {str(extract_error)}")
+                    
+                    error_message = f"報告請求重複"
+>>>>>>> origin/devin/1747835831-improve-error-logging
                     if duplicate_report_id:
                         error_message += f", 重複報告 ID: {duplicate_report_id}"
                     
                     raise ValueError(f"DUPLICATE_REPORT:{duplicate_report_id}:{error_message}")
+<<<<<<< HEAD
+=======
+                    
+>>>>>>> origin/devin/1747835831-improve-error-logging
                 else:
-                    error_message = f"Amazon API 返回錯誤 ({e.response.status_code}): {e.response.text}"
+                    logger.error(f"Amazon API 請求失敗 ({status_code}): {response_text}")
+                    error_message = f"Amazon API 返回錯誤 ({status_code}): {response_text}"
                     raise ValueError(error_message)
-            raise
+            else:
+                logger.error(f"創建報告時出錯: {str(e)}")
+                raise
     
     def _get_report_type_id(self, ad_product: str) -> str:
         """
