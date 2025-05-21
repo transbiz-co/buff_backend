@@ -1071,12 +1071,49 @@ class AmazonAdsService:
                     error_message = f"Amazon API 返回錯誤 (400 Bad Request): {e.response.text}"
                     raise ValueError(error_message)
                 elif e.response.status_code == 425:
-                    error_message = f"Amazon API 返回錯誤 (425 Too Early): 報告生成請求過早，請稍後再試"
-                    raise ValueError(error_message)
+                    logger.info(f"收到 425 錯誤，表示報告請求已被 Amazon 接收: {e.response.text}")
+                    
+                    duplicate_report_id = None
+                    try:
+                        error_response = json.loads(e.response.text)
+                        if "detail" in error_response:
+                            detail = error_response["detail"]
+                            logger.info(f"425 錯誤詳情: {detail}")
+                            
+                            if "duplicate of :" in detail:
+                                duplicate_report_id = detail.split("duplicate of :")[1].strip()
+                                logger.info(f"從 425 錯誤中提取到重複報告 ID: {duplicate_report_id}")
+                    except Exception as extract_error:
+                        logger.error(f"從 425 錯誤響應中提取報告 ID 時出錯: {str(extract_error)}")
+                    
+                    error_message = f"Amazon API 返回錯誤 (425 Duplicate Request): 報告請求重複"
+                    if duplicate_report_id:
+                        error_message += f", 重複報告 ID: {duplicate_report_id}"
+                    
+                    raise ValueError(f"DUPLICATE_REPORT:{duplicate_report_id}:{error_message}")
                 else:
                     error_message = f"Amazon API 返回錯誤 ({e.response.status_code}): {e.response.text}"
                     raise ValueError(error_message)
             raise
+    
+    def _get_report_type_id(self, ad_product: str) -> str:
+        """
+        根據廣告產品類型獲取報告類型 ID
+        
+        Args:
+            ad_product: 廣告產品類型
+            
+        Returns:
+            str: 報告類型 ID
+        """
+        if ad_product == "SPONSORED_PRODUCTS":
+            return "spCampaigns"
+        elif ad_product == "SPONSORED_BRANDS":
+            return "sbCampaigns"
+        elif ad_product == "SPONSORED_DISPLAY":
+            return "sdCampaigns"
+        else:
+            raise ValueError(f"不支援的廣告產品類型: {ad_product}")
     
     def _get_report_columns(self, ad_product: str) -> List[str]:
         """
@@ -1403,46 +1440,93 @@ class AmazonAdsService:
             
             try:
                 # 創建報告請求
-                retry_count = 0
-                max_retries = 3
-                retry_delay = 2  # 秒
-                
-                while retry_count <= max_retries:
-                    try:
-                        report_data = await self.create_report(
-                            profile_id=profile_id,
-                            access_token=access_token,
-                            ad_product=ad_product,
-                            start_date=start_date,
-                            end_date=end_date,
-                            user_id=connection.user_id
-                        )
-                        
-                        if report_data and report_data.get("reportId"):
-                            result_stats["created_reports"] = 1
-                            result_stats["message"] = f"Successfully created {ad_product} report"
-                            result_stats["report_id"] = report_data.get("reportId")
-                            break  # 成功創建報告，退出重試循環
+                try:
+                    report_data = await self.create_report(
+                        profile_id=profile_id,
+                        access_token=access_token,
+                        ad_product=ad_product,
+                        start_date=start_date,
+                        end_date=end_date,
+                        user_id=connection.user_id
+                    )
+                    
+                    if report_data and report_data.get("reportId"):
+                        result_stats["created_reports"] = 1
+                        result_stats["message"] = f"Successfully created {ad_product} report"
+                        result_stats["report_id"] = report_data.get("reportId")
+                    else:
+                        result_stats["success"] = False
+                        result_stats["message"] = f"Failed to create {ad_product} report"
+                except ValueError as ve:
+                    error_message = str(ve)
+                    
+                    if "DUPLICATE_REPORT:" in error_message:
+                        parts = error_message.split(":")
+                        if len(parts) >= 3:
+                            duplicate_report_id = parts[1]
+                            logger.info(f"檢測到重複報告 ID: {duplicate_report_id}")
+                            
+                            if supabase and duplicate_report_id:
+                                try:
+                                    existing_report = supabase.table('amazon_ads_reports').select('*').eq('report_id', duplicate_report_id).execute()
+                                    
+                                    if existing_report.data:
+                                        logger.info(f"資料庫中已有重複報告記錄: {duplicate_report_id}")
+                                        result_stats["created_reports"] = 1
+                                        result_stats["message"] = f"Report already exists in database: {duplicate_report_id}"
+                                        result_stats["report_id"] = duplicate_report_id
+                                    else:
+                                        logger.info(f"資料庫中沒有重複報告記錄，創建新記錄: {duplicate_report_id}")
+                                        
+                                        report_record = {
+                                            "report_id": duplicate_report_id,
+                                            "user_id": connection.user_id,
+                                            "profile_id": profile_id,
+                                            "name": f"{ad_product} report {start_date} to {end_date} for Profile {profile_id} (from 425 error)",
+                                            "status": "PENDING",  # 假設狀態為 PENDING
+                                            "ad_product": ad_product,
+                                            "report_type_id": self._get_report_type_id(ad_product),
+                                            "start_date": start_date,
+                                            "end_date": end_date,
+                                            "time_unit": "DAILY",
+                                            "format": "GZIP_JSON",
+                                            "configuration": {
+                                                "adProduct": ad_product,
+                                                "groupBy": ["campaign"],
+                                                "columns": self._get_report_columns(ad_product),
+                                                "reportTypeId": self._get_report_type_id(ad_product),
+                                                "timeUnit": "DAILY",
+                                                "format": "GZIP_JSON"
+                                            },
+                                            "created_at": datetime.now().isoformat(),
+                                            "updated_at": datetime.now().isoformat()
+                                        }
+                                        
+                                        try:
+                                            insert_result = supabase.table('amazon_ads_reports').insert(report_record).execute()
+                                            logger.info(f"成功將重複報告記錄保存到資料庫: {duplicate_report_id}")
+                                            result_stats["created_reports"] = 1
+                                            result_stats["message"] = f"Saved duplicate report to database: {duplicate_report_id}"
+                                            result_stats["report_id"] = duplicate_report_id
+                                        except Exception as db_error:
+                                            logger.error(f"保存重複報告記錄到資料庫時出錯: {str(db_error)}")
+                                            result_stats["success"] = False
+                                            result_stats["message"] = f"Failed to save duplicate report to database: {str(db_error)}"
+                                except Exception as db_query_error:
+                                    logger.error(f"查詢重複報告記錄時出錯: {str(db_query_error)}")
+                                    result_stats["success"] = False
+                                    result_stats["message"] = f"Failed to query duplicate report: {str(db_query_error)}"
                         else:
-                            result_stats["success"] = False
-                            result_stats["message"] = f"Failed to create {ad_product} report"
-                            break  # 沒有獲取到報告ID，退出重試循環
-                    except ValueError as ve:
-                        error_message = str(ve)
-                        if "425 Too Early" in error_message and retry_count < max_retries:
-                            retry_count += 1
-                            logger.warning(f"獲取到 425 Too Early 錯誤，將進行第 {retry_count} 次重試（共 {max_retries} 次）")
-                            await asyncio.sleep(retry_delay * retry_count)  # 指數退避策略
-                            continue
-                        else:
+                            logger.error(f"無法從錯誤消息中提取重複報告 ID: {error_message}")
                             result_stats["success"] = False
                             result_stats["message"] = error_message
-                            break
-                    except Exception as e:
-                        logger.error(f"為配置檔案 {profile_id} 創建 {ad_product} 報告時出錯: {str(e)}")
+                    else:
                         result_stats["success"] = False
-                        result_stats["message"] = str(e)
-                        break
+                        result_stats["message"] = error_message
+                except Exception as e:
+                    logger.error(f"為配置檔案 {profile_id} 創建 {ad_product} 報告時出錯: {str(e)}")
+                    result_stats["success"] = False
+                    result_stats["message"] = str(e)
             except Exception as e:
                 logger.error(f"為配置檔案 {profile_id} 創建 {ad_product} 報告時出錯: {str(e)}")
                 result_stats["success"] = False
