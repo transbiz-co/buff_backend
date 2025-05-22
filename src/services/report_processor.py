@@ -303,7 +303,7 @@ class ReportProcessor:
         reports_result = query.limit(limit).execute()
         return reports_result.data
     
-    async def _process_report_content(self, content: bytes) -> Dict[str, Any]:
+    async def _process_report_content(self, content: bytes) -> Union[Dict[str, Any], List[Dict[str, Any]]]:
         """
         處理報告內容 - 解壓並解析 GZIP_JSON 格式
         
@@ -311,7 +311,7 @@ class ReportProcessor:
             content: 報告的原始字節數據
             
         Returns:
-            Dict[str, Any]: 解析後的報告數據
+            Union[Dict[str, Any], List[Dict[str, Any]]]: 解析後的報告數據
         """
         logger.info("正在處理報告內容...")
         
@@ -394,7 +394,7 @@ class ReportProcessor:
             logger.error(traceback.format_exc())
             raise
             
-    async def _store_report_in_timescaledb(self, report_record: Dict[str, Any], report_data: Dict[str, Any]) -> None:
+    async def _store_report_in_timescaledb(self, report_record: Dict[str, Any], report_data: Union[Dict[str, Any], List[Dict[str, Any]]]) -> None:
         """
         將報告數據存儲到 TimescaleDB
         
@@ -407,6 +407,10 @@ class ReportProcessor:
         """
         ad_product = report_record['ad_product']
         
+        if not isinstance(report_data, list):
+            logger.warning(f"報告數據不是列表格式: {type(report_data)}")
+            return
+            
         if ad_product == AdProduct.SPONSORED_PRODUCTS.value:
             await self._store_sp_report(report_record, report_data)
         elif ad_product == AdProduct.SPONSORED_BRANDS.value:
@@ -415,6 +419,37 @@ class ReportProcessor:
             await self._store_sd_report(report_record, report_data)
         else:
             logger.warning(f"未知的廣告產品類型: {ad_product}")
+            
+    async def _batch_insert(self, table_name: str, records: List[Dict[str, Any]], batch_size: int = 200) -> None:
+        """
+        批量插入數據到指定表
+        
+        Args:
+            table_name: 表名
+            records: 要插入的記錄列表
+            batch_size: 批量插入的大小
+            
+        Returns:
+            None
+        """
+        if not records:
+            logger.warning(f"沒有記錄要插入到 {table_name}")
+            return
+            
+        total_records = len(records)
+        logger.info(f"開始批量插入 {total_records} 條記錄到 {table_name}")
+        
+        for i in range(0, total_records, batch_size):
+            batch = records[i:i + batch_size]
+            try:
+                supabase.table(table_name).upsert(
+                    batch,
+                    on_conflict=['date', 'campaignId']
+                ).execute()
+                logger.info(f"成功插入/更新批次 {i//batch_size + 1}/{(total_records + batch_size - 1)//batch_size}：{len(batch)} 條記錄")
+            except Exception as e:
+                logger.error(f"批量插入/更新到 {table_name} 時出錯: {str(e)}")
+                logger.error(traceback.format_exc())
     
     async def _store_sp_report(self, report_record: Dict[str, Any], report_data: List[Dict[str, Any]]) -> None:
         """
@@ -427,11 +462,13 @@ class ReportProcessor:
         Returns:
             None
         """
-        logger.info(f"存儲 SP 報告數據: {report_record['report_id']}")
+        logger.info(f"存儲 SP 報告數據: {report_record['report_id']}, 共 {len(report_data)} 條記錄")
         
         if not isinstance(report_data, list):
             logger.warning(f"報告數據不是列表格式: {type(report_data)}")
             return
+        
+        batch_records = []
         
         for item in report_data:
             try:
@@ -444,30 +481,22 @@ class ReportProcessor:
                     "time": datetime.now().isoformat(),
                     "report_id": report_record['report_id'],
                     "profile_id": report_record['profile_id'],
-                    "campaign_id": str(campaign_id),
-                    "campaign_name": item.get('campaignName'),
-                    "campaign_status": item.get('campaignStatus'),
-                    "campaign_budget_amount": item.get('campaignBudgetAmount'),
-                    "campaign_budget_type": item.get('campaignBudgetType'),
-                    "campaign_budget_currency_code": item.get('campaignBudgetCurrencyCode'),
-                    
-                    "impressions": item.get('impressions'),
-                    "clicks": item.get('clicks'),
-                    "cost": item.get('cost'),
-                    "attributed_sales_14d": item.get('sales14d'),
-                    "attributed_conversions_14d": item.get('purchases14d'),
-                    "attributed_sales_30d": item.get('sales30d'),
-                    "attributed_conversions_30d": item.get('purchases30d'),
-                    
+                    "campaignId": str(campaign_id),
+                    "date": item.get('date'),
                     "user_id": report_record['user_id'],
-                    "date": item.get('date')
                 }
                 
-                supabase.table('amazon_ads_reports_sp').insert(insert_data).execute()
+                for key, value in item.items():
+                    if key not in insert_data:  # 避免覆蓋已設置的值
+                        insert_data[key] = value
+                
+                batch_records.append(insert_data)
                 
             except Exception as e:
-                logger.error(f"插入 SP 報告數據時出錯: {str(e)}")
+                logger.error(f"準備 SP 報告數據時出錯: {str(e)}")
                 logger.error(traceback.format_exc())
+        
+        await self._batch_insert('amazon_ads_reports_sp', batch_records)
     
     async def _store_sb_report(self, report_record: Dict[str, Any], report_data: List[Dict[str, Any]]) -> None:
         """
@@ -480,11 +509,13 @@ class ReportProcessor:
         Returns:
             None
         """
-        logger.info(f"存儲 SB 報告數據: {report_record['report_id']}")
+        logger.info(f"存儲 SB 報告數據: {report_record['report_id']}, 共 {len(report_data)} 條記錄")
         
         if not isinstance(report_data, list):
             logger.warning(f"報告數據不是列表格式: {type(report_data)}")
             return
+        
+        batch_records = []
         
         for item in report_data:
             try:
@@ -497,32 +528,22 @@ class ReportProcessor:
                     "time": datetime.now().isoformat(),
                     "report_id": report_record['report_id'],
                     "profile_id": report_record['profile_id'],
-                    "campaign_id": str(campaign_id),
-                    "campaign_name": item.get('campaignName'),
-                    "campaign_status": item.get('campaignStatus'),
-                    "campaign_budget_amount": item.get('campaignBudgetAmount'),
-                    "campaign_budget_type": item.get('campaignBudgetType'),
-                    "campaign_budget_currency_code": item.get('campaignBudgetCurrencyCode'),
-                    
-                    "impressions": item.get('impressions'),
-                    "clicks": item.get('clicks'),
-                    "cost": item.get('cost'),
-                    "attributed_sales_14d": item.get('sales14d'),
-                    "attributed_conversions_14d": item.get('purchases14d'),
-                    "attributed_detail_page_views_14d": item.get('detailPageViews'),
-                    "attributed_sales_30d": item.get('sales30d'),
-                    "attributed_conversions_30d": item.get('purchases30d'),
-                    "attributed_detail_page_views_30d": item.get('detailPageViews'),
-                    
+                    "campaignId": str(campaign_id),
+                    "date": item.get('date'),
                     "user_id": report_record['user_id'],
-                    "date": item.get('date')
                 }
                 
-                supabase.table('amazon_ads_reports_sb').insert(insert_data).execute()
+                for key, value in item.items():
+                    if key not in insert_data:  # 避免覆蓋已設置的值
+                        insert_data[key] = value
+                
+                batch_records.append(insert_data)
                 
             except Exception as e:
-                logger.error(f"插入 SB 報告數據時出錯: {str(e)}")
+                logger.error(f"準備 SB 報告數據時出錯: {str(e)}")
                 logger.error(traceback.format_exc())
+        
+        await self._batch_insert('amazon_ads_reports_sb', batch_records)
     
     async def _store_sd_report(self, report_record: Dict[str, Any], report_data: List[Dict[str, Any]]) -> None:
         """
@@ -535,11 +556,13 @@ class ReportProcessor:
         Returns:
             None
         """
-        logger.info(f"存儲 SD 報告數據: {report_record['report_id']}")
+        logger.info(f"存儲 SD 報告數據: {report_record['report_id']}, 共 {len(report_data)} 條記錄")
         
         if not isinstance(report_data, list):
             logger.warning(f"報告數據不是列表格式: {type(report_data)}")
             return
+        
+        batch_records = []
         
         for item in report_data:
             try:
@@ -552,31 +575,19 @@ class ReportProcessor:
                     "time": datetime.now().isoformat(),
                     "report_id": report_record['report_id'],
                     "profile_id": report_record['profile_id'],
-                    "campaign_id": str(campaign_id),
-                    "campaign_name": item.get('campaignName'),
-                    "campaign_status": item.get('campaignStatus'),
-                    "campaign_budget_amount": item.get('campaignBudgetAmount'),
-                    "campaign_budget_type": item.get('campaignBudgetType'),
-                    "campaign_budget_currency_code": item.get('campaignBudgetCurrencyCode'),
-                    
-                    "impressions": item.get('impressions'),
-                    "clicks": item.get('clicks'),
-                    "cost": item.get('cost'),
-                    "attributed_sales_14d": item.get('sales14d'),
-                    "attributed_conversions_14d": item.get('purchases14d'),
-                    "attributed_sales_30d": item.get('sales30d'),
-                    "attributed_conversions_30d": item.get('purchases30d'),
-                    
-                    "off_amazon_clicks": item.get('offAmazonClicks'),
-                    "off_amazon_views": item.get('offAmazonViews'),
-                    "off_amazon_product_sales": item.get('offAmazonProductSales'),
-                    
+                    "campaignId": str(campaign_id),
+                    "date": item.get('date'),
                     "user_id": report_record['user_id'],
-                    "date": item.get('date')
                 }
                 
-                supabase.table('amazon_ads_reports_sd').insert(insert_data).execute()
+                for key, value in item.items():
+                    if key not in insert_data:  # 避免覆蓋已設置的值
+                        insert_data[key] = value
+                
+                batch_records.append(insert_data)
                 
             except Exception as e:
-                logger.error(f"插入 SD 報告數據時出錯: {str(e)}")
+                logger.error(f"準備 SD 報告數據時出錯: {str(e)}")
                 logger.error(traceback.format_exc())
+        
+        await self._batch_insert('amazon_ads_reports_sd', batch_records)
