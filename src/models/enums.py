@@ -1,4 +1,4 @@
-from enum import Enum, auto
+from enum import Enum
 
 class ReportStatus(str, Enum):
     """Amazon 報告狀態枚舉"""
@@ -10,13 +10,13 @@ class ReportStatus(str, Enum):
 class DownloadStatus(str, Enum):
     """報告下載狀態枚舉"""
     PENDING = "PENDING"
-    DOWNLOADED = "DOWNLOADED"
+    COMPLETED = "COMPLETED"
     FAILED = "FAILED"
 
 class ProcessedStatus(str, Enum):
     """報告處理狀態枚舉"""
     PENDING = "PENDING"
-    PROCESSED = "PROCESSED"
+    COMPLETED = "COMPLETED"
     FAILED = "FAILED"
 
 class AdProduct(str, Enum):
