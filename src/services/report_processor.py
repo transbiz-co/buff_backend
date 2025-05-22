@@ -292,7 +292,7 @@ class ReportProcessor:
         """
         query = supabase.table('amazon_ads_reports').select('*')
         
-        query = query.eq('status', ReportStatus.COMPLETED.value).eq('download_status', DownloadStatus.PENDING.value)
+        query = query.eq('status', ReportStatus.PENDING.value).eq('download_status', DownloadStatus.PENDING.value)
         
         if user_id:
             query = query.eq('user_id', user_id)

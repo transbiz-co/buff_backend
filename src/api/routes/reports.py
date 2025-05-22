@@ -490,7 +490,7 @@ async def check_and_process_reports(
             raise HTTPException(status_code=500, detail=f"批量處理報告時出錯: {str(e)}")
 
 @router.post(
-    "/sync/amazon/advertising/reporting/campaign/reports",
+    "/campaigns/",
     summary="申請廣告活動報告",
     description="""
     申請 Amazon 廣告活動報告。

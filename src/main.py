@@ -109,18 +109,18 @@ def custom_openapi():
     openapi_schema["tags"] = [
         {
             "name": "connections",
-            "description": "第三方平台連接管理",
+            "description": "Amazon 授權帳號管理",
             "externalDocs": {
                 "description": "文檔",
                 "url": "https://example.com/docs/connections"
             }
         },
         {
-            "name": "amazon-ads-campaigns",
-            "description": "Amazon Ads 廣告活動管理與優化",
+            "name": "amazon-ads-metadatas",
+            "description": "Amazon 廣告 Metadata",
             "externalDocs": {
                 "description": "文檔",
-                "url": "https://example.com/docs/amazon-ads-campaigns"
+                "url": "https://example.com/docs/amazon-ads-metadatas"
             }
         },
     ]

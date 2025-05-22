@@ -13,19 +13,19 @@ from ...models.connections import AmazonAdsConnection
 logger = logging.getLogger(__name__)
 
 router = APIRouter(
-    prefix="/campaigns", 
-    tags=["amazon-ads-campaigns"],
+    prefix="/metadatas", 
+    tags=["amazon-ads-metadatas"],
     responses={404: {"description": "未找到"}}
 )
 
 # 同步用戶的所有廣告活動
 @router.post(
-    "/sync",
-    summary="同步 Amazon Ads 廣告活動",
+    "/campaigns",
+    summary="同步 Amazon Ads Campaigns Metadata",
     description="""
-    同步指定用戶的所有 Amazon Ads 廣告活動資料。
+    同步指定用戶的所有 Amazon Ads Campaigns Metadata
     
-    此 API 會獲取用戶所有 Amazon Ads 連接檔案，然後針對每個檔案調用 SP、SB、SD 三種廣告活動的 API，
+    此 API 會獲取用戶所有 Amazon profiles，並取得每個 profile 的 SP、SB、SD 三種 campaign metadata，
     並將結果存儲到資料庫中。此操作可能需要較長時間，取決於用戶的廣告活動數量。
     """,
     responses={
