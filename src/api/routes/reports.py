@@ -6,6 +6,7 @@ import traceback
 
 from ...services.amazon_ads import amazon_ads_service, supabase
 from ...core.security import decrypt_token
+from ...models.enums import ReportStatus, DownloadStatus, ProcessedStatus, AdProduct
 
 # 設定全局日誌
 logger = logging.getLogger(__name__)
@@ -395,18 +396,21 @@ async def check_and_process_reports(
     返回:
         報告處理結果
     """
+    from ...services.report_processor import ReportProcessor
+    
+    report_processor = ReportProcessor(amazon_ads_service)
+    
     # 如果提供了特定的 report_id，則只處理該報告
     if report_id:
         logger.info(f"檢查特定報告: {report_id}")
         try:
-            # 調用服務方法檢查並下載報告
-            result = await amazon_ads_service.check_and_download_report(report_id)
+            result = await report_processor.process_report(report_id)
             
             # 將單個報告結果包裝為一致的格式
             return {
                 "total_reports": 1,
-                "processed_reports": 1 if result.get('download_status') == "DOWNLOADED" else 0,
-                "failed_reports": 0 if result.get('download_status') == "DOWNLOADED" else 1,
+                "processed_reports": 1 if result.get('download_status') == DownloadStatus.DOWNLOADED.value else 0,
+                "failed_reports": 0 if result.get('download_status') == DownloadStatus.DOWNLOADED.value else 1,
                 "details": [result]
             }
         except ValueError as e:
@@ -421,62 +425,12 @@ async def check_and_process_reports(
         logger.info("開始檢查和處理待處理的報告")
         
         try:
-            # 構建查詢
-            query = supabase.table('amazon_ads_reports').select('*')
+            result = await report_processor.process_multiple_reports(
+                user_id=user_id,
+                profile_id=profile_id,
+                limit=limit
+            )
             
-            # 僅選擇已完成但未下載的報告
-            query = query.eq('status', 'COMPLETED').eq('download_status', 'PENDING')
-            
-            # 如果指定了用戶 ID，則添加過濾條件
-            if user_id:
-                query = query.eq('user_id', user_id)
-                
-            # 如果指定了配置檔案 ID，則添加過濾條件
-            if profile_id:
-                query = query.eq('profile_id', profile_id)
-                
-            # 執行查詢
-            reports_result = query.limit(limit).execute()
-            pending_reports = reports_result.data
-            
-            # 處理結果
-            result = {
-                "total_reports": len(pending_reports),
-                "processed_reports": 0,
-                "failed_reports": 0,
-                "details": []
-            }
-            
-            # 處理每個報告
-            for report in pending_reports:
-                try:
-                    report_result = await amazon_ads_service.check_and_download_report(report['report_id'])
-                    
-                    # 更新計數
-                    if report_result.get('download_status') == "DOWNLOADED":
-                        result["processed_reports"] += 1
-                    else:
-                        result["failed_reports"] += 1
-                        
-                    # 添加詳細信息
-                    result["details"].append(report_result)
-                    
-                except Exception as e:
-                    logger.error(f"處理報告 {report['report_id']} 時出錯: {str(e)}")
-                    logger.error(traceback.format_exc())
-                    
-                    # 更新計數
-                    result["failed_reports"] += 1
-                    
-                    # 添加詳細信息
-                    result["details"].append({
-                        "report_id": report['report_id'],
-                        "status": report.get('status'),
-                        "download_status": "FAILED",
-                        "message": f"處理出錯: {str(e)}"
-                    })
-            
-            # 返回結果
             return result
             
         except Exception as e:
