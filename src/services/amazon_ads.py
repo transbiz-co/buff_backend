@@ -1041,6 +1041,7 @@ class AmazonAdsService:
                             on_conflict='profile_id,ad_product,start_date,end_date,report_type_id'
                         ).execute()
                         logger.info(f"報告信息已保存/更新到數據庫: {report_data.get('reportId')}")
+                        
                     except Exception as db_error:
                         logger.error(f"保存報告信息到數據庫時出錯: {str(db_error)}")
                         logger.error(traceback.format_exc())
