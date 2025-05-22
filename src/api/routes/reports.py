@@ -454,7 +454,7 @@ async def check_and_process_reports(
             # 處理每個報告
             for report in pending_reports:
                 try:
-                    report_result = await amazon_ads_service.check_and_download_report(report['report_id'])
+                    report_result = await report_processor.process_report(report['report_id']) # amazon_ads_service.check_and_download_report(report['report_id'])
                     
                     # 更新計數
                     if report_result.get('download_status') == DownloadStatus.COMPLETED.value:

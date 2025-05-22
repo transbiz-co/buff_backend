@@ -442,10 +442,7 @@ class ReportProcessor:
         for i in range(0, total_records, batch_size):
             batch = records[i:i + batch_size]
             try:
-                supabase.table(table_name).upsert(
-                    batch,
-                    on_conflict=['date', 'campaignId']
-                ).execute()
+                supabase.table(table_name).upsert(batch).execute()
                 logger.info(f"成功插入/更新批次 {i//batch_size + 1}/{(total_records + batch_size - 1)//batch_size}：{len(batch)} 條記錄")
             except Exception as e:
                 logger.error(f"批量插入/更新到 {table_name} 時出錯: {str(e)}")
@@ -478,7 +475,6 @@ class ReportProcessor:
                     continue
                 
                 insert_data = {
-                    "time": datetime.now().isoformat(),
                     "report_id": report_record['report_id'],
                     "profile_id": report_record['profile_id'],
                     "campaignId": str(campaign_id),
@@ -496,7 +492,7 @@ class ReportProcessor:
                 logger.error(f"準備 SP 報告數據時出錯: {str(e)}")
                 logger.error(traceback.format_exc())
         
-        await self._batch_insert('amazon_ads_reports_sp', batch_records)
+        await self._batch_insert('amazon_ads_campaigns_reports_sp', batch_records)
     
     async def _store_sb_report(self, report_record: Dict[str, Any], report_data: List[Dict[str, Any]]) -> None:
         """
@@ -525,7 +521,6 @@ class ReportProcessor:
                     continue
                 
                 insert_data = {
-                    "time": datetime.now().isoformat(),
                     "report_id": report_record['report_id'],
                     "profile_id": report_record['profile_id'],
                     "campaignId": str(campaign_id),
@@ -543,7 +538,7 @@ class ReportProcessor:
                 logger.error(f"準備 SB 報告數據時出錯: {str(e)}")
                 logger.error(traceback.format_exc())
         
-        await self._batch_insert('amazon_ads_reports_sb', batch_records)
+        await self._batch_insert('amazon_ads_campaigns_reports_sb', batch_records)
     
     async def _store_sd_report(self, report_record: Dict[str, Any], report_data: List[Dict[str, Any]]) -> None:
         """
@@ -572,7 +567,6 @@ class ReportProcessor:
                     continue
                 
                 insert_data = {
-                    "time": datetime.now().isoformat(),
                     "report_id": report_record['report_id'],
                     "profile_id": report_record['profile_id'],
                     "campaignId": str(campaign_id),
@@ -590,4 +584,4 @@ class ReportProcessor:
                 logger.error(f"準備 SD 報告數據時出錯: {str(e)}")
                 logger.error(traceback.format_exc())
         
-        await self._batch_insert('amazon_ads_reports_sd', batch_records)
+        await self._batch_insert('amazon_ads_campaigns_reports_sd', batch_records)
