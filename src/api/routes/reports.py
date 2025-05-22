@@ -429,8 +429,7 @@ async def check_and_process_reports(
             # 構建查詢
             query = supabase.table('amazon_ads_reports').select('*')
             
-            # 僅選擇已完成但未下載的報告
-            query = query.eq('status', ReportStatus.COMPLETED.value).eq('download_status', DownloadStatus.PENDING.value)
+            query = query.eq('status', ReportStatus.PENDING.value)
             
             # 如果指定了用戶 ID，則添加過濾條件
             if user_id:
