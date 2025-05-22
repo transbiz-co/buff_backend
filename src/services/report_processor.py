@@ -101,7 +101,7 @@ class ReportProcessor:
             try:
                 report_result = await self.process_report(report['report_id'])
                 
-                if report_result.get('download_status') == DownloadStatus.DOWNLOADED.value:
+                if report_result.get('download_status') == DownloadStatus.COMPLETED.value:
                     result["processed_reports"] += 1
                 else:
                     result["failed_reports"] += 1
@@ -195,7 +195,7 @@ class ReportProcessor:
         Returns:
             Dict[str, Any]: 更新後的處理結果
         """
-        if report_record.get("download_status") == DownloadStatus.DOWNLOADED.value and report_record.get("storage_path"):
+        if report_record.get("download_status") == DownloadStatus.COMPLETED.value and report_record.get("storage_path"):
             result["message"] = "報告已下載過"
             result["storage_path"] = report_record.get("storage_path")
             return result
@@ -219,16 +219,16 @@ class ReportProcessor:
             )
             
             update_data = {
-                "download_status": DownloadStatus.DOWNLOADED.value,
-                "processed_status": ProcessedStatus.PROCESSED.value,
+                "download_status": DownloadStatus.COMPLETED.value,
+                "processed_status": ProcessedStatus.COMPLETED.value,
                 "storage_path": storage_path,
                 "updated_at": datetime.now().isoformat()
             }
             
             supabase.table('amazon_ads_reports').update(update_data).eq('report_id', report_record['report_id']).execute()
             
-            result["download_status"] = DownloadStatus.DOWNLOADED.value
-            result["processed_status"] = ProcessedStatus.PROCESSED.value
+            result["download_status"] = DownloadStatus.COMPLETED.value
+            result["processed_status"] = ProcessedStatus.COMPLETED.value
             result["storage_path"] = storage_path
             result["message"] = "報告已成功下載和處理"
             
