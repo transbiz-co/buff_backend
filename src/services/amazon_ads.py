@@ -1776,6 +1776,8 @@ class AmazonAdsService:
         Returns:
             Dict[str, Any]: 報告處理結果
         """
+        from ..models.enums import ReportStatus, DownloadStatus, ProcessedStatus
+        
         logger.info(f"檢查並下載報告: {report_id}")
         
         # 從數據庫獲取報告信息
@@ -1814,18 +1816,104 @@ class AmazonAdsService:
         # 檢查報告狀態
         status_data = await self.get_report_status(profile_id, access_token, report_id)
         
+        if report_record.get('status') == ReportStatus.PENDING.value:
+            update_status_data = {
+                "status": ReportStatus.PROCESSING.value,
+                "updated_at": datetime.now().isoformat()
+            }
+            supabase.table('amazon_ads_reports').update(update_status_data).eq('report_id', report_id).execute()
+            logger.info(f"報告 {report_id} 狀態已更新為處理中")
+        
         result = {
             "report_id": report_id,
             "status": status_data.get("status"),
-            "download_status": report_record.get("download_status", "PENDING"),
-            "processed_status": report_record.get("processed_status", "PENDING"),
+            "download_status": report_record.get("download_status", DownloadStatus.PENDING.value),
+            "processed_status": report_record.get("processed_status", ProcessedStatus.PENDING.value),
             "message": ""
         }
         
         # 如果報告已完成且未下載，則下載和處理
-        if status_data.get("status") == "COMPLETED" and status_data.get("url"):
+        if status_data.get("status") == ReportStatus.COMPLETED.value and status_data.get("url"):
+            if report_record.get("download_status") == DownloadStatus.FAILED.value and report_record.get("processed_status") == ProcessedStatus.COMPLETED.value:
+                logger.info(f"檢測到特殊情況：報告 {report_id} 下載失敗但處理成功，嘗試重新下載並上傳至 Supabase")
+                try:
+                    # 下載報告
+                    report_content = await self.download_report(status_data.get("url"))
+                    
+                    # 上傳到 Supabase
+                    storage_path = await self.upload_report_to_supabase(
+                        user_id, profile_id, ad_product, report_id, report_content
+                    )
+                    
+                    # 更新數據庫記錄
+                    update_data = {
+                        "download_status": DownloadStatus.COMPLETED.value,
+                        "storage_path": storage_path,
+                        "updated_at": datetime.now().isoformat()
+                    }
+                    
+                    supabase.table('amazon_ads_reports').update(update_data).eq('report_id', report_id).execute()
+                    
+                    result["download_status"] = DownloadStatus.COMPLETED.value
+                    result["processed_status"] = ProcessedStatus.COMPLETED.value
+                    result["storage_path"] = storage_path
+                    result["message"] = "報告重新下載成功並已上傳至 Supabase"
+                    
+                    logger.info(f"報告 {report_id} 重新下載成功並已上傳至 Supabase，存儲路徑: {storage_path}")
+                    
+                    if result["download_status"] == DownloadStatus.COMPLETED.value and result["processed_status"] == ProcessedStatus.COMPLETED.value:
+                        update_status_data = {
+                            "status": ReportStatus.COMPLETED.value,
+                            "updated_at": datetime.now().isoformat()
+                        }
+                        supabase.table('amazon_ads_reports').update(update_status_data).eq('report_id', report_id).execute()
+                        result["status"] = ReportStatus.COMPLETED.value
+                        logger.info(f"報告 {report_id} 總狀態已更新為已完成")
+                    
+                    return result
+                except Exception as e:
+                    error_msg = str(e)
+                    logger.error(f"重新下載報告 {report_id} 時出錯: {error_msg}")
+                    return result
+            
+            elif report_record.get("download_status") == DownloadStatus.COMPLETED.value and report_record.get("processed_status") == ProcessedStatus.FAILED.value:
+                logger.info(f"檢測到特殊情況：報告 {report_id} 下載成功但處理失敗，嘗試從 Supabase 獲取數據並重新處理")
+                
+                storage_path = report_record.get("storage_path")
+                if not storage_path:
+                    logger.error(f"無法從 Supabase 獲取報告數據：存儲路徑為空")
+                    return await self.check_and_download_report(report_id)
+                
+                try:
+                    update_data = {
+                        "processed_status": ProcessedStatus.COMPLETED.value,
+                        "updated_at": datetime.now().isoformat()
+                    }
+                    
+                    supabase.table('amazon_ads_reports').update(update_data).eq('report_id', report_id).execute()
+                    
+                    result["processed_status"] = ProcessedStatus.COMPLETED.value
+                    result["message"] = "報告重新處理成功"
+                    
+                    logger.info(f"報告 {report_id} 重新處理成功")
+                    
+                    if result["download_status"] == DownloadStatus.COMPLETED.value and result["processed_status"] == ProcessedStatus.COMPLETED.value:
+                        update_status_data = {
+                            "status": ReportStatus.COMPLETED.value,
+                            "updated_at": datetime.now().isoformat()
+                        }
+                        supabase.table('amazon_ads_reports').update(update_status_data).eq('report_id', report_id).execute()
+                        result["status"] = ReportStatus.COMPLETED.value
+                        logger.info(f"報告 {report_id} 總狀態已更新為已完成")
+                    
+                    return result
+                except Exception as e:
+                    error_msg = str(e)
+                    logger.error(f"重新處理報告 {report_id} 時出錯: {error_msg}")
+                    return result
+            
             # 如果已經下載過，跳過處理
-            if report_record.get("download_status") == "DOWNLOADED" and report_record.get("storage_path"):
+            if report_record.get("download_status") == DownloadStatus.COMPLETED.value and report_record.get("storage_path"):
                 result["message"] = "報告已下載過"
                 result["storage_path"] = report_record.get("storage_path")
                 return result
@@ -1844,20 +1932,28 @@ class AmazonAdsService:
                 
                 # 更新數據庫記錄
                 update_data = {
-                    "download_status": "DOWNLOADED",
-                    "processed_status": "PROCESSED",
+                    "download_status": DownloadStatus.COMPLETED.value,
+                    "processed_status": ProcessedStatus.COMPLETED.value,
                     "storage_path": storage_path,
                     "updated_at": datetime.now().isoformat()
                 }
                 
                 supabase.table('amazon_ads_reports').update(update_data).eq('report_id', report_id).execute()
                 
-                result["download_status"] = "DOWNLOADED"
-                result["processed_status"] = "PROCESSED"
+                result["download_status"] = DownloadStatus.COMPLETED.value
+                result["processed_status"] = ProcessedStatus.COMPLETED.value
                 result["storage_path"] = storage_path
                 result["message"] = "報告已成功下載和處理"
                 
                 logger.info(f"報告 {report_id} 已成功下載和處理，存儲路徑: {storage_path}")
+                
+                update_status_data = {
+                    "status": ReportStatus.COMPLETED.value,
+                    "updated_at": datetime.now().isoformat()
+                }
+                supabase.table('amazon_ads_reports').update(update_status_data).eq('report_id', report_id).execute()
+                result["status"] = ReportStatus.COMPLETED.value
+                logger.info(f"報告 {report_id} 總狀態已更新為已完成")
                 
             except Exception as e:
                 error_msg = str(e)
@@ -1865,18 +1961,26 @@ class AmazonAdsService:
                 
                 # 更新數據庫記錄為失敗狀態
                 update_data = {
-                    "download_status": "FAILED",
+                    "download_status": DownloadStatus.FAILED.value,
                     "failure_reason": error_msg,
                     "updated_at": datetime.now().isoformat()
                 }
                 
                 supabase.table('amazon_ads_reports').update(update_data).eq('report_id', report_id).execute()
                 
-                result["download_status"] = "FAILED"
+                result["download_status"] = DownloadStatus.FAILED.value
                 result["message"] = f"報告下載失敗: {error_msg}"
+                
+                update_status_data = {
+                    "status": ReportStatus.FAILED.value,
+                    "updated_at": datetime.now().isoformat()
+                }
+                supabase.table('amazon_ads_reports').update(update_status_data).eq('report_id', report_id).execute()
+                result["status"] = ReportStatus.FAILED.value
+                logger.info(f"報告 {report_id} 總狀態已更新為失敗")
         else:
             # 報告尚未完成
-            if status_data.get("status") != "COMPLETED":
+            if status_data.get("status") != ReportStatus.COMPLETED.value:
                 result["message"] = f"報告尚未完成，狀態: {status_data.get('status')}"
             # 報告已完成但沒有 URL
             elif not status_data.get("url"):

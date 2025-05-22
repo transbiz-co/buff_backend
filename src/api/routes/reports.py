@@ -6,6 +6,7 @@ import traceback
 
 from ...services.amazon_ads import amazon_ads_service, supabase
 from ...core.security import decrypt_token
+from ...models.enums import ReportStatus, DownloadStatus, ProcessedStatus, AdProduct
 
 # 設定全局日誌
 logger = logging.getLogger(__name__)
@@ -89,7 +90,7 @@ async def sync_user_reports(
     logger.info(f"報告時間範圍: {start_date} 至 {end_date}")
     
     # 如果未指定廣告產品類型，則處理所有類型
-    ad_product_types = ["SPONSORED_PRODUCTS", "SPONSORED_BRANDS", "SPONSORED_DISPLAY"]
+    ad_product_types = [AdProduct.SPONSORED_PRODUCTS.value, AdProduct.SPONSORED_BRANDS.value, AdProduct.SPONSORED_DISPLAY.value]
     
     if ad_product:
         # 如果指定了特定類型，只處理該類型
@@ -254,7 +255,7 @@ async def sync_profile_reports(
     logger.info(f"報告時間範圍: {start_date} 至 {end_date}")
     
     # 如果未指定廣告產品類型，則處理所有類型
-    ad_product_types = ["SPONSORED_PRODUCTS", "SPONSORED_BRANDS", "SPONSORED_DISPLAY"]
+    ad_product_types = [AdProduct.SPONSORED_PRODUCTS.value, AdProduct.SPONSORED_BRANDS.value, AdProduct.SPONSORED_DISPLAY.value]
     
     if ad_product:
         # 如果指定了特定類型，只處理該類型
@@ -405,8 +406,8 @@ async def check_and_process_reports(
             # 將單個報告結果包裝為一致的格式
             return {
                 "total_reports": 1,
-                "processed_reports": 1 if result.get('download_status') == "DOWNLOADED" else 0,
-                "failed_reports": 0 if result.get('download_status') == "DOWNLOADED" else 1,
+                "processed_reports": 1 if result.get('download_status') == DownloadStatus.COMPLETED.value else 0,
+                "failed_reports": 0 if result.get('download_status') == DownloadStatus.COMPLETED.value else 1,
                 "details": [result]
             }
         except ValueError as e:
@@ -425,7 +426,7 @@ async def check_and_process_reports(
             query = supabase.table('amazon_ads_reports').select('*')
             
             # 僅選擇已完成但未下載的報告
-            query = query.eq('status', 'COMPLETED').eq('download_status', 'PENDING')
+            query = query.eq('status', ReportStatus.COMPLETED.value).eq('download_status', DownloadStatus.PENDING.value)
             
             # 如果指定了用戶 ID，則添加過濾條件
             if user_id:
@@ -453,7 +454,7 @@ async def check_and_process_reports(
                     report_result = await amazon_ads_service.check_and_download_report(report['report_id'])
                     
                     # 更新計數
-                    if report_result.get('download_status') == "DOWNLOADED":
+                    if report_result.get('download_status') == DownloadStatus.COMPLETED.value:
                         result["processed_reports"] += 1
                     else:
                         result["failed_reports"] += 1
@@ -472,7 +473,7 @@ async def check_and_process_reports(
                     result["details"].append({
                         "report_id": report['report_id'],
                         "status": report.get('status'),
-                        "download_status": "FAILED",
+                        "download_status": DownloadStatus.FAILED.value,
                         "message": f"處理出錯: {str(e)}"
                     })
             
@@ -561,7 +562,7 @@ async def sync_amazon_advertising_campaign_reports(
         raise HTTPException(status_code=400, detail=f"日期格式錯誤: {str(e)}")
     
     # 如果未指定廣告產品類型，則處理所有類型
-    ad_product_types = ["SPONSORED_PRODUCTS", "SPONSORED_BRANDS", "SPONSORED_DISPLAY"]
+    ad_product_types = [AdProduct.SPONSORED_PRODUCTS.value, AdProduct.SPONSORED_BRANDS.value, AdProduct.SPONSORED_DISPLAY.value]
     
     if ad_product:
         # 如果指定了特定類型，只處理該類型
