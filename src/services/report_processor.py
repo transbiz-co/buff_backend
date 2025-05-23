@@ -412,7 +412,8 @@ class ReportProcessor:
                         if "DUPLICATE_REPORT:" in error_message:
                             try:
                                 duplicate_info = await self.handle_duplicate_report_error(
-                                    error_message, profile_id, access_token
+                                    error_message, profile_id, access_token, 
+                                    connection.user_id, ad_product, start_date, end_date
                                 )
                                 
                                 if duplicate_info.get("handled", False):
@@ -480,7 +481,11 @@ class ReportProcessor:
     async def handle_duplicate_report_error(self, 
                                           error_message: str, 
                                           profile_id: str, 
-                                          access_token: str) -> Dict[str, Any]:
+                                          access_token: str,
+                                          user_id: str,
+                                          ad_product: str,
+                                          start_date: str,
+                                          end_date: str) -> Dict[str, Any]:
         """
         處理重複報告錯誤 (425)
         
@@ -488,6 +493,10 @@ class ReportProcessor:
             error_message: 錯誤信息
             profile_id: Amazon Ads 配置檔案 ID
             access_token: 訪問令牌
+            user_id: 用戶ID
+            ad_product: 廣告產品類型
+            start_date: 報告開始日期
+            end_date: 報告結束日期
             
         Returns:
             Dict[str, Any]: 處理結果
@@ -526,11 +535,77 @@ class ReportProcessor:
             logger.info(f"數據庫中不存在報告記錄，從 Amazon 獲取狀態: {duplicate_report_id}")
             
             try:
-                status_data = await self.get_report_status(
-                    profile_id, access_token, duplicate_report_id
-                )
+                # 直接調用 Amazon API 獲取報告狀態
+                headers = {
+                    "Authorization": f"Bearer {access_token}",
+                    "Amazon-Advertising-API-ClientId": self.amazon_ads_service.client_id,
+                    "Amazon-Advertising-API-Scope": profile_id,
+                    "Accept": "application/json"
+                }
                 
-                logger.info(f"成功獲取重複報告狀態並保存到數據庫: {duplicate_report_id}")
+                endpoint = f"{self.amazon_ads_service.api_host}/reporting/reports/{duplicate_report_id}"
+                
+                async with self.amazon_ads_service.httpx_client() as client:
+                    response = await client.get(endpoint, headers=headers)
+                    response.raise_for_status()
+                    status_data = response.json()
+                
+                logger.info(f"成功從 Amazon 獲取報告狀態: {duplicate_report_id}, status={status_data.get('status')}")
+                
+                # 確定報告類型ID
+                if ad_product == "SPONSORED_PRODUCTS":
+                    report_type_id = "spCampaigns"
+                elif ad_product == "SPONSORED_BRANDS":
+                    report_type_id = "sbCampaigns"
+                elif ad_product == "SPONSORED_DISPLAY":
+                    report_type_id = "sdCampaigns"
+                else:
+                    report_type_id = "unknown"
+                
+                # 構建完整的報告記錄
+                report_record = {
+                    "report_id": duplicate_report_id,
+                    "user_id": user_id,
+                    "profile_id": profile_id,
+                    "name": status_data.get("name", f"{ad_product} report {start_date} to {end_date} for Profile {profile_id}"),
+                    "status": status_data.get("status"),
+                    "ad_product": ad_product,
+                    "report_type_id": report_type_id,
+                    "start_date": start_date,
+                    "end_date": end_date,
+                    "time_unit": "DAILY",
+                    "format": "GZIP_JSON",
+                    "configuration": {
+                        "adProduct": ad_product,
+                        "groupBy": ["campaign"],
+                        "columns": self._get_report_columns(ad_product),
+                        "reportTypeId": report_type_id,
+                        "timeUnit": "DAILY",
+                        "format": "GZIP_JSON"
+                    },
+                    "created_at": datetime.now().isoformat(),
+                    "updated_at": datetime.now().isoformat(),
+                    "amazon_created_at": status_data.get("createdAt"),
+                    "amazon_updated_at": status_data.get("updatedAt"),
+                    "url": status_data.get("url"),
+                    "url_expires_at": status_data.get("urlExpiresAt"),
+                    "file_size": status_data.get("fileSize"),
+                    "failure_reason": status_data.get("failureReason")
+                }
+                
+                # 使用 upsert 操作插入/更新報告記錄
+                if supabase:
+                    try:
+                        result = supabase.table('amazon_ads_reports').upsert(
+                            report_record,
+                            on_conflict='report_id'
+                        ).execute()
+                        logger.info(f"成功保存重複報告記錄到數據庫: {duplicate_report_id}")
+                    except Exception as db_error:
+                        logger.error(f"保存重複報告記錄到數據庫時出錯: {str(db_error)}")
+                        logger.error(traceback.format_exc())
+                
+                logger.info(f"成功處理重複報告: {duplicate_report_id}")
                 return {
                     "handled": True,
                     "message": "Retrieved and saved duplicate report",
