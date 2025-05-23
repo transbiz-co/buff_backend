@@ -5,9 +5,11 @@ from typing import Dict, Any, List, Optional, Union
 import json
 import gzip
 import io
+import asyncio
 
 from ..models.enums import ReportStatus, DownloadStatus, ProcessedStatus, AdProduct
 from .amazon_ads import supabase
+from ..core.security import decrypt_token
 
 logger = logging.getLogger(__name__)
 
@@ -19,6 +21,117 @@ class ReportProcessor:
     
     def __init__(self, amazon_ads_service):
         self.amazon_ads_service = amazon_ads_service
+    
+    async def create_campaign_reports(self, 
+                                profile_id: str, 
+                                ad_product: str,
+                                start_date: Optional[str] = None, 
+                                end_date: Optional[str] = None) -> Dict[str, Any]:
+        """
+        為 profile 申請 campaign report
+        
+        Args:
+            profile_id: Amazon Ads 配置檔案 ID
+            ad_product: 廣告產品類型
+            start_date: 報告開始日期 (YYYY-MM-DD)，默認為前7天
+            end_date: 報告結束日期 (YYYY-MM-DD)，默認為前1天
+            
+        Returns:
+            Dict[str, Any]: 處理結果統計
+        """
+        logger.info(f"為配置檔案 {profile_id} 創建 {ad_product} 報告")
+        
+        # 獲取連接詳情
+        connection = await self.amazon_ads_service.get_connection_by_profile_id(profile_id)
+        
+        if not connection:
+            logger.warning(f"未找到配置檔案 {profile_id} 的連接")
+            return {
+                "success": False,
+                "message": "Connection not found",
+                "created_reports": 0
+            }
+        
+        # 處理結果統計
+        result_stats = {
+            "success": True,
+            "profile_id": profile_id,
+            "created_reports": 0
+        }
+        
+        try:
+            # 解密刷新令牌
+            refresh_token = decrypt_token(connection.refresh_token)
+            
+            # 刷新訪問令牌
+            token_response = await self.amazon_ads_service.refresh_access_token(refresh_token)
+            access_token = token_response.get("access_token")
+            
+            if not access_token:
+                logger.error(f"無法獲取訪問令牌: {profile_id}")
+                return {
+                    "success": False,
+                    "message": "Failed to get access token",
+                    "created_reports": 0
+                }
+            
+            try:
+                # 創建報告請求
+                retry_count = 0
+                max_retries = 3
+                retry_delay = 2  # 秒
+                
+                while retry_count <= max_retries:
+                    try:
+                        report_data = await self.amazon_ads_service.create_report(
+                            profile_id=profile_id,
+                            access_token=access_token,
+                            ad_product=ad_product,
+                            start_date=start_date,
+                            end_date=end_date,
+                            user_id=connection.user_id
+                        )
+                        
+                        if report_data and report_data.get("reportId"):
+                            result_stats["created_reports"] = 1
+                            result_stats["message"] = f"Successfully created {ad_product} report"
+                            result_stats["report_id"] = report_data.get("reportId")
+                            break  # 成功創建報告，退出重試循環
+                        else:
+                            result_stats["success"] = False
+                            result_stats["message"] = f"Failed to create {ad_product} report"
+                            break  # 沒有獲取到報告ID，退出重試循環
+                    except ValueError as ve:
+                        error_message = str(ve)
+                        if "425 Too Early" in error_message and retry_count < max_retries:
+                            retry_count += 1
+                            logger.warning(f"獲取到 425 Too Early 錯誤，將進行第 {retry_count} 次重試（共 {max_retries} 次）")
+                            await asyncio.sleep(retry_delay * retry_count)  # 指數退避策略
+                            continue
+                        else:
+                            result_stats["success"] = False
+                            result_stats["message"] = error_message
+                            break
+                    except Exception as e:
+                        logger.error(f"為配置檔案 {profile_id} 創建 {ad_product} 報告時出錯: {str(e)}")
+                        result_stats["success"] = False
+                        result_stats["message"] = str(e)
+                        break
+            except Exception as e:
+                logger.error(f"為配置檔案 {profile_id} 創建 {ad_product} 報告時出錯: {str(e)}")
+                result_stats["success"] = False
+                result_stats["message"] = str(e)
+            
+            return result_stats
+            
+        except Exception as e:
+            logger.error(f"為配置檔案 {profile_id} 創建報告時出錯: {str(e)}")
+            logger.error(traceback.format_exc())
+            return {
+                "success": False,
+                "message": str(e),
+                "created_reports": 0
+            }
     
     async def process_report(self, report_id: str) -> Dict[str, Any]:
         """
