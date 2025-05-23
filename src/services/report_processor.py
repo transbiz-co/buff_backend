@@ -22,6 +22,141 @@ class ReportProcessor:
     def __init__(self, amazon_ads_service):
         self.amazon_ads_service = amazon_ads_service
     
+    async def bulk_create_reports(self, 
+                              user_id: str,
+                              ad_product: str,
+                              start_date: Optional[str] = None, 
+                              end_date: Optional[str] = None) -> Dict[str, Any]:
+        """
+        批量創建用戶的所有廣告活動報告
+        
+        Args:
+            user_id: 用戶ID
+            ad_product: 廣告產品類型
+            start_date: 報告開始日期 (YYYY-MM-DD)，默認為前7天
+            end_date: 報告結束日期 (YYYY-MM-DD)，默認為前1天
+            
+        Returns:
+            Dict[str, Any]: 處理結果統計
+        """
+        logger.info(f"開始批量創建用戶 {user_id} 的 {ad_product} 報告")
+        
+        # 獲取用戶的所有連接檔案
+        connections = await self.amazon_ads_service.get_user_connections(user_id)
+        
+        if not connections:
+            logger.warning(f"未找到用戶 {user_id} 的連接檔案")
+            return {
+                "success": False,
+                "message": "No Amazon Ads connections found for this user",
+                "created_reports": 0
+            }
+        
+        logger.info(f"找到 {len(connections)} 個連接檔案")
+        
+        # 處理結果統計
+        result_stats = {
+            "success": True,
+            "total_profiles": len(connections),
+            "processed_profiles": 0,
+            "created_reports": 0,
+            "failed_profiles": []
+        }
+        
+        # 對每個連接檔案創建報告
+        for connection in connections:
+            try:
+                profile_id = connection.profile_id
+                logger.info(f"處理連接檔案: {profile_id}")
+                
+                # 只處理啟用且國籍為美國的連接檔案
+                if connection.country_code != "US":
+                    logger.info(f"跳過非美國國籍的檔案: {profile_id}, 國籍: {connection.country_code}")
+                    continue
+                
+                # 解密刷新令牌
+                refresh_token = decrypt_token(connection.refresh_token)
+                
+                # 刷新訪問令牌
+                try:
+                    token_response = await self.amazon_ads_service.refresh_access_token(refresh_token)
+                    access_token = token_response.get("access_token")
+                    
+                    if not access_token:
+                        logger.error(f"無法獲取訪問令牌，跳過連接檔案 {profile_id}")
+                        result_stats["failed_profiles"].append({
+                            "profile_id": profile_id,
+                            "error": "Failed to get access token"
+                        })
+                        continue
+                except Exception as e:
+                    logger.error(f"刷新訪問令牌失敗: {str(e)}")
+                    result_stats["failed_profiles"].append({
+                        "profile_id": profile_id,
+                        "error": f"Failed to refresh token: {str(e)}"
+                    })
+                    continue
+                
+                # 為該配置檔案直接創建一個報告
+                try:
+                    # 創建報告請求
+                    report_data = await self.amazon_ads_service.create_report(
+                        profile_id=profile_id,
+                        access_token=access_token,
+                        ad_product=ad_product,
+                        start_date=start_date,
+                        end_date=end_date,
+                        user_id=user_id
+                    )
+                    
+                    if report_data and report_data.get("reportId"):
+                        result_stats["created_reports"] += 1
+                        logger.info(f"為配置檔案 {profile_id} 創建了 {ad_product} 報告")
+                    else:
+                        logger.warning(f"為配置檔案 {profile_id} 創建報告失敗")
+                        result_stats["failed_profiles"].append({
+                            "profile_id": profile_id,
+                            "error": "Failed to create report, unknown reason"
+                        })
+                        continue
+                    
+                except ValueError as ve:
+                    error_message = str(ve)
+                    logger.error(f"為配置檔案 {profile_id} 創建報告時出錯: {error_message}")
+                    result_stats["failed_profiles"].append({
+                        "profile_id": profile_id,
+                        "error": f"Failed to create report: {error_message}"
+                    })
+                    continue
+                except Exception as e:
+                    logger.error(f"為配置檔案 {profile_id} 創建報告時出錯: {str(e)}")
+                    logger.error(traceback.format_exc())
+                    result_stats["failed_profiles"].append({
+                        "profile_id": profile_id,
+                        "error": f"Failed to create report: {str(e)}"
+                    })
+                    continue
+                
+                # 更新處理成功的連接檔案計數
+                result_stats["processed_profiles"] += 1
+                
+            except Exception as e:
+                logger.error(f"處理連接檔案 {connection.profile_id} 時出錯: {str(e)}")
+                logger.error(traceback.format_exc())
+                result_stats["failed_profiles"].append({
+                    "profile_id": connection.profile_id,
+                    "error": str(e)
+                })
+        
+        # 更新結果信息
+        if result_stats["created_reports"] > 0:
+            result_stats["message"] = f"Successfully created {result_stats['created_reports']} reports from {result_stats['processed_profiles']} of {result_stats['total_profiles']} profiles"
+        else:
+            result_stats["success"] = False
+            result_stats["message"] = "No reports were created"
+        
+        return result_stats
+    
     # TODO: 有重構空間，425 的意思是代表 Amazon 方面已經接收到申請正在產生報表，而 Amazon 的系統那端已經有此 id 而這次的申請就成了重複申請的意思，所以不應該用指數退避機制去重複打 Amazon 申請報表的 API，應該改成確認我們資料庫(Supabase)當中也有這筆申請紀錄就好，如果沒有就將這筆記錄抓下來保存進資料庫中就好，然後用 log 記錄一下中間發生什麼事情方便我 debug 就好，應該不用這麼複雜的判斷式
     async def create_campaign_reports(self, 
                                 profile_id: str, 

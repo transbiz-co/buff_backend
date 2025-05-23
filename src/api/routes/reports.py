@@ -474,7 +474,7 @@ async def sync_amazon_advertising_campaign_reports(
             
             try:
                 # 調用服務方法批量創建報告
-                result = await amazon_ads_service.bulk_create_reports(
+                result = await report_processor.bulk_create_reports(
                     user_id=user_id,
                     ad_product=product_type,
                     start_date=start_date,
