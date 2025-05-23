@@ -868,7 +868,7 @@ class ReportProcessor:
             return result
         
         try:
-            report_content = await self.amazon_ads_service.download_report(status_data.get("url"))
+            report_content = await self.download_report(status_data.get("url"))
             
             processed_data = await self._process_report_content(report_content)
             
@@ -1252,3 +1252,26 @@ class ReportProcessor:
                 logger.error(traceback.format_exc())
         
         await self._batch_insert('amazon_ads_campaigns_reports_sd', batch_records)
+
+    async def download_report(self, report_url: str) -> bytes:
+        """
+        下載 Amazon 廣告報告
+        
+        Args:
+            report_url: 報告下載 URL
+        
+        Returns:
+            bytes: 報告的原始字節數據
+        """
+        logger.info(f"正在下載報告: {report_url}")
+        
+        try:
+            async with httpx.AsyncClient(timeout=30.0) as client:
+                response = await client.get(report_url)
+                response.raise_for_status()
+                logger.info(f"報告下載成功，大小: {len(response.content)} 字節")
+                return response.content
+        except Exception as e:
+            logger.error(f"下載報告時出錯: {str(e)}")
+            logger.error(traceback.format_exc())
+            raise
