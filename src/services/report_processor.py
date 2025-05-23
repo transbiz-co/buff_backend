@@ -862,6 +862,7 @@ class ReportProcessor:
         Returns:
             Dict[str, Any]: 更新後的處理結果
         """
+        # TODO: 報告已下載過但沒有成功存進資料庫中，那就要重新從 supabase bucket 中讀取 json 檔案輸入，若 supabase bucket 讀取失敗，則要重新下載報告
         if report_record.get("download_status") == DownloadStatus.COMPLETED.value and report_record.get("storage_path"):
             result["message"] = "報告已下載過"
             result["storage_path"] = report_record.get("storage_path")
@@ -905,6 +906,7 @@ class ReportProcessor:
             error_msg = str(e)
             logger.error(f"處理報告 {report_record['report_id']} 時出錯: {error_msg}")
             
+            # TODO: 如果處理失敗，則要更新報告狀態為 ProcessedStatus.FAILED，並且更新報告的失敗原因
             update_data = {
                 "download_status": DownloadStatus.FAILED.value,
                 "failure_reason": error_msg,
@@ -992,6 +994,7 @@ class ReportProcessor:
             logger.info(f"報告解析成功，包含 {len(parsed_data) if isinstance(parsed_data, list) else '1'} 條記錄")
             
             return parsed_data
+        # TODO: 如果解析失敗，則要更新報告狀態為 ProcessedStatus.FAILED，並且更新報告的失敗原因
         except Exception as e:
             logger.error(f"處理報告內容時出錯: {str(e)}")
             logger.error(traceback.format_exc())
@@ -1056,6 +1059,7 @@ class ReportProcessor:
             
             logger.info(f"文件上傳成功: {storage_path}")
             return storage_path
+        # TODO: 如果上傳失敗，則要更新報告狀態為 ProcessedStatus.FAILED，並且更新報告的失敗原因
         except Exception as e:
             logger.error(f"上傳報告到 Supabase 時出錯: {str(e)}")
             logger.error(traceback.format_exc())
@@ -1072,6 +1076,8 @@ class ReportProcessor:
         Returns:
             None
         """
+
+        # TODO: 如果存儲失敗，則要更新報告狀態為 ProcessedStatus.FAILED，並且更新報告的失敗原因
         ad_product = report_record['ad_product']
         
         if not isinstance(report_data, list):
@@ -1271,6 +1277,7 @@ class ReportProcessor:
                 response.raise_for_status()
                 logger.info(f"報告下載成功，大小: {len(response.content)} 字節")
                 return response.content
+        # TODO: 如果下載失敗，則要更新報告狀態為 DownloadStatus.FAILED，並且更新報告的失敗原因
         except Exception as e:
             logger.error(f"下載報告時出錯: {str(e)}")
             logger.error(traceback.format_exc())

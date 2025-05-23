@@ -179,6 +179,7 @@ async def _get_reports_to_process(
         return result.data
         
     else:
+        # TODO: 除了查詢待處理的報告，還要查詢 下載失敗的紀錄(DownloadStatus.FAILED)、未成功存進資料庫中的紀錄(ProcessedStatus.FAILED)
         # 如果沒有提供任何特定條件，則只查詢待處理的報告
         logger.info("查詢所有待處理的報告")
         query = query.eq('status', ReportStatus.PENDING.value)
