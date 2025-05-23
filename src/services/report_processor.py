@@ -1,11 +1,12 @@
 import logging
 import traceback
-from datetime import datetime
+from datetime import datetime, timedelta
 from typing import Dict, Any, List, Optional, Union
 import json
 import gzip
 import io
 import asyncio
+import httpx
 
 from ..models.enums import ReportStatus, DownloadStatus, ProcessedStatus, AdProduct
 from .amazon_ads import supabase
@@ -22,69 +23,367 @@ class ReportProcessor:
     def __init__(self, amazon_ads_service):
         self.amazon_ads_service = amazon_ads_service
     
-    # TODO: 有重構空間，425 的意思是代表 Amazon 方面已經接收到申請正在產生報表，而 Amazon 的系統那端已經有此 id 而這次的申請就成了重複申請的意思，所以不應該用指數退避機制去重複打 Amazon 申請報表的 API，應該改成確認我們資料庫(Supabase)當中也有這筆申請紀錄就好，如果沒有就將這筆記錄抓下來保存進資料庫中就好，然後用 log 記錄一下中間發生什麼事情方便我 debug 就好，應該不用這麼複雜的判斷式
-    async def create_campaign_reports(self, 
-                                profile_id: str, 
-                                ad_product: str,
-                                start_date: Optional[str] = None, 
-                                end_date: Optional[str] = None) -> Dict[str, Any]:
+    async def create_report(self, 
+                          profile_id: str, 
+                          access_token: str, 
+                          ad_product: str,
+                          start_date: Optional[str] = None, 
+                          end_date: Optional[str] = None,
+                          user_id: Optional[str] = None,
+                          report_name: Optional[str] = None,
+                          report_type_id: Optional[str] = None) -> Dict[str, Any]:
         """
-        為 profile 申請 spCampaign, sbCampaign, sdCampaign report
+        創建Amazon廣告報告請求
         
         Args:
             profile_id: Amazon Ads 配置檔案 ID
+            access_token: 訪問令牌
+            ad_product: 廣告產品類型 (SPONSORED_PRODUCTS, SPONSORED_BRANDS, SPONSORED_DISPLAY)
+            start_date: 報告開始日期 (YYYY-MM-DD)，默認為前7天
+            end_date: 報告結束日期 (YYYY-MM-DD)，默認為前1天
+            user_id: 用戶ID，用於記錄
+            report_name: 報告名稱，默認自動生成
+            report_type_id: 報告類型ID，默認根據ad_product選擇
+            
+        Returns:
+            Dict[str, Any]: 報告請求的響應
+        """
+        logger.info(f"開始創建 {ad_product} 報告，profile_id={profile_id}")
+        
+        # 確定報告類型ID
+        if not report_type_id:
+            if ad_product == "SPONSORED_PRODUCTS":
+                report_type_id = "spCampaigns"
+            elif ad_product == "SPONSORED_BRANDS":
+                report_type_id = "sbCampaigns"
+            elif ad_product == "SPONSORED_DISPLAY":
+                report_type_id = "sdCampaigns"
+            else:
+                raise ValueError(f"不支援的廣告產品類型: {ad_product}")
+        
+        # 確定日期範圍
+        today = datetime.now()
+        if not start_date:
+            # 默認前7天
+            start_date = (today - timedelta(days=7)).strftime("%Y-%m-%d")
+        if not end_date:
+            # 默認前1天
+            end_date = (today - timedelta(days=1)).strftime("%Y-%m-%d")
+            
+        # 確定報告名稱
+        if not report_name:
+            report_name = f"{ad_product} report {start_date} to {end_date} for Profile {profile_id}"
+        
+        # 構建報告配置
+        configuration = {
+            "adProduct": ad_product,
+            "groupBy": ["campaign"],
+            "columns": self._get_report_columns(ad_product),
+            "reportTypeId": report_type_id,
+            "timeUnit": "DAILY",
+            "format": "GZIP_JSON"
+        }
+        
+        # 構建請求體
+        request_body = {
+            "name": report_name,
+            "startDate": start_date,
+            "endDate": end_date,
+            "configuration": configuration
+        }
+        
+        # 設置請求頭
+        headers = {
+            "Authorization": f"Bearer {access_token}",
+            "Amazon-Advertising-API-ClientId": self.amazon_ads_service.client_id,
+            "Amazon-Advertising-API-Scope": profile_id,
+            "Content-Type": "application/vnd.createasyncreportrequest.v3+json"
+        }
+        
+        # 調用API創建報告
+        endpoint = f"{self.amazon_ads_service.api_host}/reporting/reports"
+        
+        try:
+            async with self.amazon_ads_service.httpx_client() as client:
+                response = await client.post(endpoint, headers=headers, json=request_body)
+                response.raise_for_status()
+                report_data = response.json()
+                
+                logger.info(f"成功創建報告: report_id={report_data.get('reportId')}, status={report_data.get('status')}")
+                
+                # 將報告信息保存到數據庫
+                if supabase:
+                    try:
+                        report_record = {
+                            "report_id": report_data.get("reportId"),
+                            "user_id": user_id,
+                            "profile_id": profile_id,
+                            "name": report_data.get("name"),
+                            "status": report_data.get("status"),
+                            "ad_product": ad_product,
+                            "report_type_id": report_type_id,
+                            "start_date": start_date,
+                            "end_date": end_date,
+                            "time_unit": configuration.get("timeUnit"),
+                            "format": configuration.get("format"),
+                            "configuration": configuration,
+                            "created_at": datetime.now().isoformat(),
+                            "updated_at": datetime.now().isoformat(),
+                            "amazon_created_at": report_data.get("createdAt"),
+                            "amazon_updated_at": report_data.get("updatedAt"),
+                            "url": report_data.get("url"),
+                            "url_expires_at": report_data.get("urlExpiresAt"),
+                            "file_size": report_data.get("fileSize"),
+                            "failure_reason": report_data.get("failureReason")
+                        }
+                        
+                        result = supabase.table('amazon_ads_reports').upsert(
+                            report_record,
+                            on_conflict='profile_id,ad_product,start_date,end_date,report_type_id'
+                        ).execute()
+                        logger.info(f"報告信息已保存/更新到數據庫: {report_data.get('reportId')}")
+                    except Exception as db_error:
+                        logger.error(f"保存報告信息到數據庫時出錯: {str(db_error)}")
+                        logger.error(traceback.format_exc())
+                
+                return report_data
+        except Exception as e:
+            if isinstance(e, httpx.HTTPStatusError):
+                status_code = e.response.status_code
+                response_text = e.response.text
+                
+                if status_code == 400:
+                    logger.error(f"Amazon API 請求無效 (400 Bad Request): {response_text}")
+                    error_message = f"Amazon API 返回錯誤 (400 Bad Request): {response_text}"
+                    raise ValueError(error_message)
+                    
+                elif status_code == 425:
+                    logger.info(f"檢測到重複報告請求 (425): {response_text}")
+                    
+                    duplicate_report_id = None
+                    try:
+                        error_response = json.loads(response_text)
+                        if "detail" in error_response:
+                            detail = error_response["detail"]
+                            logger.info(f"重複報告詳情: {detail}")
+                            
+                            if "duplicate of :" in detail:
+                                duplicate_report_id = detail.split("duplicate of :")[1].strip()
+                                logger.info(f"重複報告 ID: {duplicate_report_id}")
+                    except Exception as extract_error:
+                        logger.info(f"無法從響應中提取報告 ID: {str(extract_error)}")
+                    
+                    error_message = f"報告請求重複"
+                    if duplicate_report_id:
+                        error_message += f", 重複報告 ID: {duplicate_report_id}"
+                    
+                    raise ValueError(f"DUPLICATE_REPORT:{duplicate_report_id}:{error_message}")
+                    
+                else:
+                    logger.error(f"Amazon API 請求失敗 ({status_code}): {response_text}")
+                    error_message = f"Amazon API 返回錯誤 ({status_code}): {response_text}"
+                    raise ValueError(error_message)
+            else:
+                logger.error(f"創建報告時出錯: {str(e)}")
+                raise
+    
+    def _get_report_columns(self, ad_product: str) -> List[str]:
+        """
+        獲取指定廣告產品的報告欄位
+        
+        Args:
             ad_product: 廣告產品類型
+            
+        Returns:
+            List[str]: 欄位列表
+        """
+        
+        match ad_product:
+            case "SPONSORED_PRODUCTS":
+                return [ 
+                    "impressions","clicks","cost","purchases1d","purchases7d","purchases14d","purchases30d",
+                    "purchasesSameSku1d","purchasesSameSku7d","purchasesSameSku14d","purchasesSameSku30d",
+                    "unitsSoldClicks1d","unitsSoldClicks7d","unitsSoldClicks14d","unitsSoldClicks30d",
+                    "sales1d","sales7d","sales14d","sales30d",
+                    "attributedSalesSameSku1d","attributedSalesSameSku7d","attributedSalesSameSku14d","attributedSalesSameSku30d",
+                    "unitsSoldSameSku1d","unitsSoldSameSku7d","unitsSoldSameSku14d","unitsSoldSameSku30d",
+                    "kindleEditionNormalizedPagesRead14d","kindleEditionNormalizedPagesRoyalties14d",
+                    "qualifiedBorrows","royaltyQualifiedBorrows","addToList","date",
+                    "campaignBiddingStrategy","costPerClick","clickThroughRate","spend",
+                    "acosClicks14d","roasClicks14d","retailer",
+                    "campaignName","campaignId","campaignStatus","campaignBudgetAmount","campaignBudgetType","campaignRuleBasedBudgetAmount",
+                    "campaignApplicableBudgetRuleId","campaignApplicableBudgetRuleName","campaignBudgetCurrencyCode","topOfSearchImpressionShare"
+                ]
+            case "SPONSORED_BRANDS":
+                return [
+                    "campaignName","campaignId","campaignStatus","impressions","clicks","cost","date",
+                    "brandedSearches","purchases","purchasesPromoted","detailPageViews",
+                    "newToBrandPurchasesRate","newToBrandPurchases","newToBrandPurchasesPercentage",
+                    "sales","salesPromoted","newToBrandSales","newToBrandSalesPercentage","newToBrandUnitsSold","newToBrandUnitsSoldPercentage",
+                    "unitsSold","viewClickThroughRate","video5SecondViewRate","video5SecondViews",
+                    "videoCompleteViews","videoFirstQuartileViews","videoMidpointViews","videoThirdQuartileViews",
+                    "videoUnmutes","viewableImpressions","viewabilityRate",
+                    "brandedSearchesClicks","purchasesClicks","detailPageViewsClicks","newToBrandPurchasesClicks","salesClicks",
+                    "newToBrandSalesClicks","newToBrandUnitsSoldClicks","unitsSoldClicks","costType","newToBrandDetailPageViews",
+                    "newToBrandDetailPageViewsClicks","newToBrandDetailPageViewRate","newToBrandECPDetailPageView",
+                    "addToCart","addToCartClicks","addToCartRate","eCPAddToCart",
+                    "kindleEditionNormalizedPagesRead14d","kindleEditionNormalizedPagesRoyalties14d",
+                    "qualifiedBorrows","qualifiedBorrowsFromClicks","royaltyQualifiedBorrows","royaltyQualifiedBorrowsFromClicks",
+                    "addToList","addToListFromClicks","longTermSales","longTermROAS",
+                    "campaignBudgetAmount","campaignBudgetCurrencyCode","campaignBudgetType","topOfSearchImpressionShare","campaignRuleBasedBudgetAmount"
+                ]
+            case "SPONSORED_DISPLAY":
+                return [
+                    "date","purchasesClicks","purchasesPromotedClicks","detailPageViewsClicks","newToBrandPurchasesClicks",
+                    "salesClicks","salesPromotedClicks","newToBrandSalesClicks","unitsSoldClicks","newToBrandUnitsSoldClicks",
+                    "campaignId","campaignName","clicks","cost","campaignBudgetCurrencyCode","impressions","purchases","detailPageViews",
+                    "sales","unitsSold","impressionsViews","newToBrandPurchases","newToBrandUnitsSold","brandedSearchesClicks",
+                    "brandedSearches","brandedSearchesViews","brandedSearchRate","eCPBrandSearch","videoCompleteViews",
+                    "videoFirstQuartileViews","videoMidpointViews","videoThirdQuartileViews","videoUnmutes","viewabilityRate",
+                    "viewClickThroughRate","addToCart","addToCartViews","addToCartClicks","addToCartRate","eCPAddToCart",
+                    "qualifiedBorrows","qualifiedBorrowsFromClicks","qualifiedBorrowsFromViews","royaltyQualifiedBorrows",
+                    "royaltyQualifiedBorrowsFromClicks","royaltyQualifiedBorrowsFromViews","addToList","addToListFromClicks",
+                    "addToListFromViews","linkOuts","leadFormOpens","leads","longTermSales","longTermROAS","newToBrandSales",
+                    "campaignStatus","campaignBudgetAmount","costType","impressionsFrequencyAverage","cumulativeReach",
+                    "newToBrandDetailPageViews","newToBrandDetailPageViewViews","newToBrandDetailPageViewClicks",
+                    "newToBrandDetailPageViewRate","newToBrandECPDetailPageView"
+                ]
+            case _:
+                return []
+            
+    async def get_report_status(self, 
+                              profile_id: str, 
+                              access_token: str, 
+                              report_id: str) -> Dict[str, Any]:
+        """
+        獲取報告狀態
+        
+        Args:
+            profile_id: Amazon Ads 配置檔案 ID
+            access_token: 訪問令牌
+            report_id: 報告ID
+            
+        Returns:
+            Dict[str, Any]: 報告狀態信息
+        """
+        logger.info(f"獲取報告狀態: report_id={report_id}")
+        
+        # 設置請求頭
+        headers = {
+            "Authorization": f"Bearer {access_token}",
+            "Amazon-Advertising-API-ClientId": self.amazon_ads_service.client_id,
+            "Amazon-Advertising-API-Scope": profile_id,
+            "Accept": "application/json"
+        }
+        
+        # 調用API獲取報告狀態
+        endpoint = f"{self.amazon_ads_service.api_host}/reporting/reports/{report_id}"
+        
+        try:
+            async with self.amazon_ads_service.httpx_client() as client:
+                response = await client.get(endpoint, headers=headers)
+                response.raise_for_status()
+                status_data = response.json()
+                
+                logger.info(f"報告狀態: report_id={report_id}, status={status_data.get('status')}")
+                
+                # 更新數據庫中的報告狀態
+                if supabase:
+                    try:
+                        update_data = {
+                            "status": status_data.get("status"),
+                            "updated_at": datetime.now().isoformat(),
+                            "amazon_updated_at": status_data.get("updatedAt"),
+                            "url": status_data.get("url"),
+                            "url_expires_at": status_data.get("urlExpiresAt"),
+                            "file_size": status_data.get("fileSize"),
+                            "failure_reason": status_data.get("failureReason")
+                        }
+                        
+                        result = supabase.table('amazon_ads_reports').update(update_data).eq('report_id', report_id).execute()
+                        logger.info(f"報告狀態已更新: {report_id}")
+                    except Exception as db_error:
+                        logger.error(f"更新報告狀態到數據庫時出錯: {str(db_error)}")
+                
+                return status_data
+        except Exception as e:
+            logger.error(f"獲取報告狀態時出錯: {str(e)}")
+            logger.error(traceback.format_exc())
+            raise
+    
+    async def create_reports_for_profiles(self, 
+                                        profiles: List,
+                                        ad_products: List[str],
+                                        start_date: Optional[str] = None, 
+                                        end_date: Optional[str] = None) -> Dict[str, Any]:
+        """
+        為指定的 profiles 統一創建報告
+        
+        Args:
+            profiles: Amazon Ads 連接列表
+            ad_products: 廣告產品類型列表
             start_date: 報告開始日期 (YYYY-MM-DD)，默認為前7天
             end_date: 報告結束日期 (YYYY-MM-DD)，默認為前1天
             
         Returns:
             Dict[str, Any]: 處理結果統計
         """
-        logger.info(f"為配置檔案 {profile_id} 創建 {ad_product} 報告")
-        
-        # 獲取連接詳情
-        connection = await self.amazon_ads_service.get_connection_by_profile_id(profile_id)
-        
-        if not connection:
-            logger.warning(f"未找到配置檔案 {profile_id} 的連接")
-            return {
-                "success": False,
-                "message": "Connection not found",
-                "created_reports": 0
-            }
+        logger.info(f"開始為 {len(profiles)} 個 profiles 創建 {len(ad_products)} 種類型的報告")
         
         # 處理結果統計
         result_stats = {
             "success": True,
-            "profile_id": profile_id,
-            "created_reports": 0
+            "total_profiles": len(profiles),
+            "processed_profiles": 0,
+            "created_reports": 0,
+            "failed_profiles": [],
+            "details": {}
         }
         
-        try:
-            # 解密刷新令牌
-            refresh_token = decrypt_token(connection.refresh_token)
-            
-            # 刷新訪問令牌
-            token_response = await self.amazon_ads_service.refresh_access_token(refresh_token)
-            access_token = token_response.get("access_token")
-            
-            if not access_token:
-                logger.error(f"無法獲取訪問令牌: {profile_id}")
-                return {
-                    "success": False,
-                    "message": "Failed to get access token",
-                    "created_reports": 0
-                }
-            
+        # 為每種廣告產品類型初始化詳情
+        for ad_product in ad_products:
+            result_stats["details"][ad_product] = {
+                "success": False,
+                "created_reports": 0,
+                "processed_profiles": 0,
+                "failed_profiles": []
+            }
+        
+        # 處理每個 profile
+        processed_profiles = set()
+        
+        for connection in profiles:
             try:
-                # 創建報告請求
-                retry_count = 0
-                max_retries = 3
-                retry_delay = 2  # 秒
+                profile_id = connection.profile_id
+                logger.info(f"處理連接檔案: {profile_id}")
                 
-                while retry_count <= max_retries:
+                # 只處理啟用且國籍為美國的連接檔案
+                if connection.country_code != "US":
+                    logger.info(f"跳過非美國國籍的檔案: {profile_id}, 國籍: {connection.country_code}")
+                    continue
+                
+                # 獲取訪問令牌
+                try:
+                    access_token = await self._get_access_token(connection)
+                except Exception as e:
+                    logger.error(f"獲取訪問令牌失敗: {str(e)}")
+                    error_info = {
+                        "profile_id": profile_id,
+                        "error": f"Failed to get access token: {str(e)}"
+                    }
+                    result_stats["failed_profiles"].append(error_info)
+                    # 為所有產品類型添加失敗記錄
+                    for ad_product in ad_products:
+                        result_stats["details"][ad_product]["failed_profiles"].append(error_info)
+                    continue
+                
+                profile_success = False
+                
+                # 為該 profile 創建每種產品類型的報告
+                for ad_product in ad_products:
                     try:
-                        report_data = await self.amazon_ads_service.create_report(
+                        # 創建報告請求
+                        report_data = await self.create_report(
                             profile_id=profile_id,
                             access_token=access_token,
                             ad_product=ad_product,
@@ -94,45 +393,299 @@ class ReportProcessor:
                         )
                         
                         if report_data and report_data.get("reportId"):
-                            result_stats["created_reports"] = 1
-                            result_stats["message"] = f"Successfully created {ad_product} report"
-                            result_stats["report_id"] = report_data.get("reportId")
-                            break  # 成功創建報告，退出重試循環
+                            result_stats["details"][ad_product]["created_reports"] += 1
+                            result_stats["created_reports"] += 1
+                            result_stats["details"][ad_product]["success"] = True
+                            profile_success = True
+                            logger.info(f"為配置檔案 {profile_id} 創建了 {ad_product} 報告")
                         else:
-                            result_stats["success"] = False
-                            result_stats["message"] = f"Failed to create {ad_product} report"
-                            break  # 沒有獲取到報告ID，退出重試循環
+                            logger.warning(f"為配置檔案 {profile_id} 創建 {ad_product} 報告失敗")
+                            result_stats["details"][ad_product]["failed_profiles"].append({
+                                "profile_id": profile_id,
+                                "error": "Failed to create report, unknown reason"
+                            })
+                            
                     except ValueError as ve:
                         error_message = str(ve)
-                        if "425 Too Early" in error_message and retry_count < max_retries:
-                            retry_count += 1
-                            logger.warning(f"獲取到 425 Too Early 錯誤，將進行第 {retry_count} 次重試（共 {max_retries} 次）")
-                            await asyncio.sleep(retry_delay * retry_count)  # 指數退避策略
-                            continue
+                        
+                        # 檢查是否為重複報告錯誤 (425)
+                        if "DUPLICATE_REPORT:" in error_message:
+                            try:
+                                duplicate_info = await self.handle_duplicate_report_error(
+                                    error_message, profile_id, access_token, 
+                                    connection.user_id, ad_product, start_date, end_date
+                                )
+                                
+                                if duplicate_info.get("handled", False):
+                                    result_stats["details"][ad_product]["created_reports"] += 1
+                                    result_stats["created_reports"] += 1
+                                    result_stats["details"][ad_product]["success"] = True
+                                    profile_success = True
+                                    logger.info(f"處理重複報告成功: {profile_id} - {ad_product}")
+                                else:
+                                    result_stats["details"][ad_product]["failed_profiles"].append({
+                                        "profile_id": profile_id,
+                                        "error": f"Duplicate report handling failed: {error_message}"
+                                    })
+                            except Exception as dup_error:
+                                logger.error(f"處理重複報告錯誤時出錯: {str(dup_error)}")
+                                result_stats["details"][ad_product]["failed_profiles"].append({
+                                    "profile_id": profile_id,
+                                    "error": f"Duplicate report error: {error_message}"
+                                })
                         else:
-                            result_stats["success"] = False
-                            result_stats["message"] = error_message
-                            break
+                            logger.error(f"為配置檔案 {profile_id} 創建 {ad_product} 報告時出錯: {error_message}")
+                            result_stats["details"][ad_product]["failed_profiles"].append({
+                                "profile_id": profile_id,
+                                "error": f"Failed to create report: {error_message}"
+                            })
+                            
                     except Exception as e:
                         logger.error(f"為配置檔案 {profile_id} 創建 {ad_product} 報告時出錯: {str(e)}")
-                        result_stats["success"] = False
-                        result_stats["message"] = str(e)
-                        break
+                        logger.error(traceback.format_exc())
+                        result_stats["details"][ad_product]["failed_profiles"].append({
+                            "profile_id": profile_id,
+                            "error": f"Failed to create report: {str(e)}"
+                        })
+                
+                # 記錄成功處理的 profile
+                if profile_success and profile_id not in processed_profiles:
+                    processed_profiles.add(profile_id)
+                    result_stats["processed_profiles"] += 1
+                    # 為每個成功的產品類型更新 processed_profiles 計數
+                    for ad_product in ad_products:
+                        if result_stats["details"][ad_product]["created_reports"] > 0:
+                            result_stats["details"][ad_product]["processed_profiles"] += 1
+                
             except Exception as e:
-                logger.error(f"為配置檔案 {profile_id} 創建 {ad_product} 報告時出錯: {str(e)}")
-                result_stats["success"] = False
-                result_stats["message"] = str(e)
+                logger.error(f"處理連接檔案 {connection.profile_id} 時出錯: {str(e)}")
+                logger.error(traceback.format_exc())
+                error_info = {
+                    "profile_id": connection.profile_id,
+                    "error": str(e)
+                }
+                result_stats["failed_profiles"].append(error_info)
+                # 為所有產品類型添加失敗記錄
+                for ad_product in ad_products:
+                    result_stats["details"][ad_product]["failed_profiles"].append(error_info)
+        
+        # 更新整體成功狀態
+        if result_stats["created_reports"] > 0:
+            result_stats["message"] = f"Successfully created {result_stats['created_reports']} reports from {result_stats['processed_profiles']} of {result_stats['total_profiles']} profiles"
+        else:
+            result_stats["success"] = False
+            result_stats["message"] = "No reports were created"
+        
+        return result_stats
+    
+    async def handle_duplicate_report_error(self, 
+                                          error_message: str, 
+                                          profile_id: str, 
+                                          access_token: str,
+                                          user_id: str,
+                                          ad_product: str,
+                                          start_date: str,
+                                          end_date: str) -> Dict[str, Any]:
+        """
+        處理重複報告錯誤 (425)
+        
+        Args:
+            error_message: 錯誤信息
+            profile_id: Amazon Ads 配置檔案 ID
+            access_token: 訪問令牌
+            user_id: 用戶ID
+            ad_product: 廣告產品類型
+            start_date: 報告開始日期
+            end_date: 報告結束日期
             
-            return result_stats
+        Returns:
+            Dict[str, Any]: 處理結果
+        """
+        logger.info(f"處理重複報告錯誤: {profile_id}")
+        
+        try:
+            # 從錯誤信息中提取重複報告 ID
+            duplicate_report_id = None
+            if "DUPLICATE_REPORT:" in error_message:
+                parts = error_message.split("DUPLICATE_REPORT:")
+                if len(parts) > 1:
+                    # 格式: "DUPLICATE_REPORT:report_id:message"
+                    info_parts = parts[1].split(":", 1)
+                    if info_parts[0]:
+                        duplicate_report_id = info_parts[0].strip()
+                        
+            if not duplicate_report_id:
+                logger.warning(f"無法從錯誤信息中提取報告 ID: {error_message}")
+                return {"handled": False, "error": "Could not extract report ID"}
             
+            logger.info(f"找到重複報告 ID: {duplicate_report_id}")
+            
+            # 檢查我們的數據庫是否已有該報告記錄
+            existing_report = await self._get_report_record(duplicate_report_id)
+            
+            if existing_report:
+                logger.info(f"數據庫中已存在報告記錄: {duplicate_report_id}")
+                return {
+                    "handled": True, 
+                    "message": "Report already exists in database",
+                    "report_id": duplicate_report_id
+                }
+            
+            # 如果數據庫中沒有記錄，從 Amazon 獲取報告狀態並保存
+            logger.info(f"數據庫中不存在報告記錄，從 Amazon 獲取狀態: {duplicate_report_id}")
+            
+            try:
+                # 直接調用 Amazon API 獲取報告狀態
+                headers = {
+                    "Authorization": f"Bearer {access_token}",
+                    "Amazon-Advertising-API-ClientId": self.amazon_ads_service.client_id,
+                    "Amazon-Advertising-API-Scope": profile_id,
+                    "Accept": "application/json"
+                }
+                
+                endpoint = f"{self.amazon_ads_service.api_host}/reporting/reports/{duplicate_report_id}"
+                
+                async with self.amazon_ads_service.httpx_client() as client:
+                    response = await client.get(endpoint, headers=headers)
+                    response.raise_for_status()
+                    status_data = response.json()
+                
+                logger.info(f"成功從 Amazon 獲取報告狀態: {duplicate_report_id}, status={status_data.get('status')}")
+                
+                # 確定報告類型ID
+                if ad_product == "SPONSORED_PRODUCTS":
+                    report_type_id = "spCampaigns"
+                elif ad_product == "SPONSORED_BRANDS":
+                    report_type_id = "sbCampaigns"
+                elif ad_product == "SPONSORED_DISPLAY":
+                    report_type_id = "sdCampaigns"
+                else:
+                    report_type_id = "unknown"
+                
+                # 構建完整的報告記錄
+                report_record = {
+                    "report_id": duplicate_report_id,
+                    "user_id": user_id,
+                    "profile_id": profile_id,
+                    "name": status_data.get("name", f"{ad_product} report {start_date} to {end_date} for Profile {profile_id}"),
+                    "status": status_data.get("status"),
+                    "ad_product": ad_product,
+                    "report_type_id": report_type_id,
+                    "start_date": start_date,
+                    "end_date": end_date,
+                    "time_unit": "DAILY",
+                    "format": "GZIP_JSON",
+                    "configuration": {
+                        "adProduct": ad_product,
+                        "groupBy": ["campaign"],
+                        "columns": self._get_report_columns(ad_product),
+                        "reportTypeId": report_type_id,
+                        "timeUnit": "DAILY",
+                        "format": "GZIP_JSON"
+                    },
+                    "created_at": datetime.now().isoformat(),
+                    "updated_at": datetime.now().isoformat(),
+                    "amazon_created_at": status_data.get("createdAt"),
+                    "amazon_updated_at": status_data.get("updatedAt"),
+                    "url": status_data.get("url"),
+                    "url_expires_at": status_data.get("urlExpiresAt"),
+                    "file_size": status_data.get("fileSize"),
+                    "failure_reason": status_data.get("failureReason")
+                }
+                
+                # 使用 upsert 操作插入/更新報告記錄
+                if supabase:
+                    try:
+                        result = supabase.table('amazon_ads_reports').upsert(
+                            report_record,
+                            on_conflict='report_id'
+                        ).execute()
+                        logger.info(f"成功保存重複報告記錄到數據庫: {duplicate_report_id}")
+                    except Exception as db_error:
+                        logger.error(f"保存重複報告記錄到數據庫時出錯: {str(db_error)}")
+                        logger.error(traceback.format_exc())
+                
+                logger.info(f"成功處理重複報告: {duplicate_report_id}")
+                return {
+                    "handled": True,
+                    "message": "Retrieved and saved duplicate report",
+                    "report_id": duplicate_report_id,
+                    "status": status_data.get("status")
+                }
+                
+            except Exception as status_error:
+                logger.error(f"獲取重複報告狀態時出錯: {str(status_error)}")
+                return {
+                    "handled": False,
+                    "error": f"Failed to get report status: {str(status_error)}"
+                }
+                
         except Exception as e:
-            logger.error(f"為配置檔案 {profile_id} 創建報告時出錯: {str(e)}")
+            logger.error(f"處理重複報告錯誤時出錯: {str(e)}")
             logger.error(traceback.format_exc())
             return {
-                "success": False,
-                "message": str(e),
-                "created_reports": 0
+                "handled": False,
+                "error": f"Error handling duplicate report: {str(e)}"
             }
+    
+    async def get_target_profiles(self, 
+                                user_id: Optional[str] = None, 
+                                profile_id: Optional[str] = None) -> List:
+        """
+        根據參數獲取目標 profiles
+        
+        Args:
+            user_id: 用戶 ID，可選
+            profile_id: Amazon Ads 配置檔案 ID，可選
+            
+        Returns:
+            List: 目標 profiles 列表
+        """
+        if profile_id:
+            logger.info(f"獲取單一 profile: {profile_id}")
+            connection = await self.amazon_ads_service.get_connection_by_profile_id(profile_id)
+            if not connection:
+                logger.warning(f"未找到配置檔案 {profile_id} 的連接")
+                return []
+            return [connection]
+        
+        elif user_id:
+            logger.info(f"獲取用戶 {user_id} 的所有 profiles")
+            connections = await self.amazon_ads_service.get_user_connections(user_id)
+            if not connections:
+                logger.warning(f"未找到用戶 {user_id} 的連接檔案")
+            return connections
+        
+        else:
+            logger.info("獲取所有 profiles")
+            connections = await self.amazon_ads_service.get_all_connections()
+            if not connections:
+                logger.warning("未找到任何 Amazon Ads 連接")
+            return connections
+    
+    def get_ad_products(self, ad_product: Optional[str] = None) -> List[str]:
+        """
+        獲取要處理的廣告產品類型列表
+        
+        Args:
+            ad_product: 指定的廣告產品類型，可選
+            
+        Returns:
+            List[str]: 廣告產品類型列表
+        """
+        available_products = [
+            AdProduct.SPONSORED_PRODUCTS.value,
+            AdProduct.SPONSORED_BRANDS.value,
+            AdProduct.SPONSORED_DISPLAY.value
+        ]
+        
+        if ad_product:
+            if ad_product in available_products:
+                return [ad_product]
+            else:
+                raise ValueError(f"Invalid ad_product: {ad_product}")
+        
+        return available_products
     
     async def process_report(self, report_id: str) -> Dict[str, Any]:
         """
@@ -158,7 +711,7 @@ class ReportProcessor:
         
         access_token = await self._get_access_token(connection)
         
-        status_data = await self.amazon_ads_service.get_report_status(
+        status_data = await self.get_report_status(
             report_record['profile_id'], 
             access_token, 
             report_id
@@ -309,13 +862,14 @@ class ReportProcessor:
         Returns:
             Dict[str, Any]: 更新後的處理結果
         """
+        # TODO: 報告已下載過但沒有成功存進資料庫中，那就要重新從 supabase bucket 中讀取 json 檔案輸入，若 supabase bucket 讀取失敗，則要重新下載報告
         if report_record.get("download_status") == DownloadStatus.COMPLETED.value and report_record.get("storage_path"):
             result["message"] = "報告已下載過"
             result["storage_path"] = report_record.get("storage_path")
             return result
         
         try:
-            report_content = await self.amazon_ads_service.download_report(status_data.get("url"))
+            report_content = await self.download_report(status_data.get("url"))
             
             processed_data = await self._process_report_content(report_content)
             
@@ -352,6 +906,7 @@ class ReportProcessor:
             error_msg = str(e)
             logger.error(f"處理報告 {report_record['report_id']} 時出錯: {error_msg}")
             
+            # TODO: 如果處理失敗，則要更新報告狀態為 ProcessedStatus.FAILED，並且更新報告的失敗原因
             update_data = {
                 "download_status": DownloadStatus.FAILED.value,
                 "failure_reason": error_msg,
@@ -439,6 +994,7 @@ class ReportProcessor:
             logger.info(f"報告解析成功，包含 {len(parsed_data) if isinstance(parsed_data, list) else '1'} 條記錄")
             
             return parsed_data
+        # TODO: 如果解析失敗，則要更新報告狀態為 ProcessedStatus.FAILED，並且更新報告的失敗原因
         except Exception as e:
             logger.error(f"處理報告內容時出錯: {str(e)}")
             logger.error(traceback.format_exc())
@@ -503,6 +1059,7 @@ class ReportProcessor:
             
             logger.info(f"文件上傳成功: {storage_path}")
             return storage_path
+        # TODO: 如果上傳失敗，則要更新報告狀態為 ProcessedStatus.FAILED，並且更新報告的失敗原因
         except Exception as e:
             logger.error(f"上傳報告到 Supabase 時出錯: {str(e)}")
             logger.error(traceback.format_exc())
@@ -519,6 +1076,8 @@ class ReportProcessor:
         Returns:
             None
         """
+
+        # TODO: 如果存儲失敗，則要更新報告狀態為 ProcessedStatus.FAILED，並且更新報告的失敗原因
         ad_product = report_record['ad_product']
         
         if not isinstance(report_data, list):
@@ -699,3 +1258,27 @@ class ReportProcessor:
                 logger.error(traceback.format_exc())
         
         await self._batch_insert('amazon_ads_campaigns_reports_sd', batch_records)
+
+    async def download_report(self, report_url: str) -> bytes:
+        """
+        下載 Amazon 廣告報告
+        
+        Args:
+            report_url: 報告下載 URL
+        
+        Returns:
+            bytes: 報告的原始字節數據
+        """
+        logger.info(f"正在下載報告: {report_url}")
+        
+        try:
+            async with httpx.AsyncClient(timeout=30.0) as client:
+                response = await client.get(report_url)
+                response.raise_for_status()
+                logger.info(f"報告下載成功，大小: {len(response.content)} 字節")
+                return response.content
+        # TODO: 如果下載失敗，則要更新報告狀態為 DownloadStatus.FAILED，並且更新報告的失敗原因
+        except Exception as e:
+            logger.error(f"下載報告時出錯: {str(e)}")
+            logger.error(traceback.format_exc())
+            raise

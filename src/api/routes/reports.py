@@ -179,6 +179,7 @@ async def _get_reports_to_process(
         return result.data
         
     else:
+        # TODO: 除了查詢待處理的報告，還要查詢 下載失敗的紀錄(DownloadStatus.FAILED)、未成功存進資料庫中的紀錄(ProcessedStatus.FAILED)
         # 如果沒有提供任何特定條件，則只查詢待處理的報告
         logger.info("查詢所有待處理的報告")
         query = query.eq('status', ReportStatus.PENDING.value)
@@ -281,7 +282,6 @@ def _update_result_counts(result: dict, report_result: dict) -> None:
     }
 )
 
-# TODO: 有重構空間：太多重複判斷
 async def sync_amazon_advertising_campaign_reports(
     start_date: str = Query(..., description="報告開始日期 (YYYY-MM-DD)"),
     end_date: str = Query(..., description="報告結束日期 (YYYY-MM-DD)"),
@@ -296,7 +296,7 @@ async def sync_amazon_advertising_campaign_reports(
         start_date: 報告開始日期 (YYYY-MM-DD)
         end_date: 報告結束日期 (YYYY-MM-DD)
         user_id: 用戶 ID，選填
-        profile_id: Amazon Ads 配置檔案 ID，選填
+        profile_id: Amazon Ads 配置檔案 ID，選填（優先級高於 user_id）
         ad_product: 廣告產品類型，不指定則生成所有類型報告
         
     返回:
@@ -308,258 +308,48 @@ async def sync_amazon_advertising_campaign_reports(
     report_processor = ReportProcessor(amazon_ads_service)
     
     try:
+        # 驗證日期格式
         datetime.strptime(start_date, "%Y-%m-%d")
         datetime.strptime(end_date, "%Y-%m-%d")
     except ValueError as e:
         logger.warning(f"日期格式錯誤: {str(e)}")
         raise HTTPException(status_code=400, detail=f"日期格式錯誤: {str(e)}")
     
-    # 如果未指定廣告產品類型，則處理所有類型
-    ad_product_types = [AdProduct.SPONSORED_PRODUCTS.value, AdProduct.SPONSORED_BRANDS.value, AdProduct.SPONSORED_DISPLAY.value]
-    
-    if ad_product:
-        # 如果指定了特定類型，只處理該類型
-        if ad_product in ad_product_types:
-            ad_product_types = [ad_product]
-        else:
-            logger.warning(f"無效的廣告產品類型: {ad_product}")
-            raise HTTPException(status_code=400, detail=f"Invalid ad_product: {ad_product}")
-    
-    # 用於存儲所有類型的結果
-    combined_result = {
-        "success": False,
-        "processed_profiles": 0,
-        "created_reports": 0,
-        "details": {},
-        "failed_profiles": []
-    }
-    
-    at_least_one_success = False
-    
-    if not user_id and not profile_id:
-        logger.info("未提供 user_id 或 profile_id，使用所有 profiles")
+    try:
+        # 1. 獲取目標 profiles（優先級：profile_id > user_id > 所有 profiles）
+        profiles = await report_processor.get_target_profiles(user_id, profile_id)
         
-        all_connections = await amazon_ads_service.get_all_connections()
+        if not profiles:
+            error_msg = "Connection not found for this profile" if profile_id else "No Amazon Ads connections found for this user" if user_id else "No Amazon Ads connections found"
+            status_code = 404
+            raise HTTPException(status_code=status_code, detail=error_msg)
         
-        if not all_connections:
-            logger.warning("未找到任何 Amazon Ads 連接")
-            raise HTTPException(status_code=404, detail="No Amazon Ads connections found")
+        # 2. 獲取要處理的廣告產品類型
+        try:
+            ad_products = report_processor.get_ad_products(ad_product)
+        except ValueError as e:
+            logger.warning(f"無效的廣告產品類型: {str(e)}")
+            raise HTTPException(status_code=400, detail=str(e))
         
-        logger.info(f"找到 {len(all_connections)} 個 Amazon Ads 連接")
+        # 3. 創建報告
+        result = await report_processor.create_reports_for_profiles(
+            profiles=profiles,
+            ad_products=ad_products,
+            start_date=start_date,
+            end_date=end_date
+        )
         
-        all_profiles_stats = {
-            "total_profiles": len(all_connections),
-            "processed_profiles": 0
-        }
+        # 4. 檢查結果並返回適當的響應
+        if not result.get("success", False):
+            logger.warning(f"申請報告失敗: {result.get('message', 'Unknown error')}")
+            raise HTTPException(status_code=400, detail=result.get("message", "Failed to create reports"))
         
-        # 處理每種廣告產品類型
-        for product_type in ad_product_types:
-            logger.info(f"處理廣告產品類型: {product_type}")
-            
-            product_result = {
-                "success": False,
-                "created_reports": 0,
-                "processed_profiles": 0,
-                "failed_profiles": []
-            }
-            
-            for connection in all_connections:
-                profile_id = connection.profile_id
-                logger.info(f"處理 profile_id={profile_id}")
-                
-                try:
-                    # 調用服務方法創建報告
-                    result = await report_processor.create_campaign_reports(
-                        profile_id=profile_id,
-                        ad_product=product_type,
-                        start_date=start_date,
-                        end_date=end_date
-                    )
-                    
-                    if result.get("success", False):
-                        product_result["processed_profiles"] += 1
-                        product_result["created_reports"] += result.get("created_reports", 0)
-                    else:
-                        product_result["failed_profiles"].append({
-                            "profile_id": profile_id,
-                            "message": result.get("message", "Unknown error")
-                        })
-                    
-                except Exception as e:
-                    logger.error(f"處理 profile_id={profile_id}, product_type={product_type} 時出錯: {str(e)}")
-                    logger.error(traceback.format_exc())
-                    
-                    product_result["failed_profiles"].append({
-                        "profile_id": profile_id,
-                        "message": str(e)
-                    })
-            
-            product_result["success"] = product_result["processed_profiles"] > 0
-            
-            # 如果至少有一個 profile 成功，則整體結果為成功
-            if product_result["success"]:
-                at_least_one_success = True
-            
-            # 更新合計數據
-            all_profiles_stats["processed_profiles"] += product_result["processed_profiles"]
-            combined_result["created_reports"] += product_result["created_reports"]
-            combined_result["failed_profiles"].extend(product_result["failed_profiles"])
-            
-            # 記錄詳細結果
-            combined_result["details"][product_type] = {
-                "success": product_result["success"],
-                "created_reports": product_result["created_reports"],
-                "message": f"Processed {product_result['processed_profiles']} of {len(all_connections)} profiles"
-            }
+        return result
         
-        combined_result["total_profiles"] = all_profiles_stats["total_profiles"]
-        combined_result["processed_profiles"] = all_profiles_stats["processed_profiles"]
-    
-    elif profile_id:
-        logger.info(f"使用 profile_id={profile_id} 申請報告")
-        
-        combined_result["profile_id"] = profile_id
-        
-        # 處理每種廣告產品類型
-        for product_type in ad_product_types:
-            logger.info(f"處理廣告產品類型: {product_type}")
-            
-            try:
-                # 調用服務方法創建報告
-                result = await report_processor.create_campaign_reports(
-                    profile_id=profile_id,
-                    ad_product=product_type,
-                    start_date=start_date,
-                    end_date=end_date
-                )
-                
-                # 記錄詳細結果
-                combined_result["details"][product_type] = {
-                    "success": result.get("success", False),
-                    "created_reports": result.get("created_reports", 0),
-                    "message": result.get("message", "")
-                }
-                
-                # 如果至少有一種類型成功，則整體結果為成功
-                if result.get("success", False):
-                    at_least_one_success = True
-                    
-                # 更新合計數據
-                combined_result["processed_profiles"] += (1 if result.get("success", False) else 0)
-                combined_result["created_reports"] += result.get("created_reports", 0)
-                
-            except Exception as e:
-                logger.error(f"處理 {product_type} 時出錯: {str(e)}")
-                logger.error(traceback.format_exc())
-                
-                # 記錄錯誤
-                combined_result["details"][product_type] = {
-                    "success": False,
-                    "created_reports": 0,
-                    "message": f"Error: {str(e)}"
-                }
-    
-    if user_id:
-        logger.info(f"使用 user_id={user_id} 申請報告")
-        
-        combined_result["user_id"] = user_id
-        user_result_stats = {
-            "total_profiles": 0,
-            "processed_profiles": 0
-        }
-        
-        # 處理每種廣告產品類型
-        for product_type in ad_product_types:
-            logger.info(f"處理廣告產品類型: {product_type}")
-            
-            try:
-                # 調用服務方法批量創建報告
-                result = await amazon_ads_service.bulk_create_reports(
-                    user_id=user_id,
-                    ad_product=product_type,
-                    start_date=start_date,
-                    end_date=end_date
-                )
-                
-                # 記錄詳細結果
-                combined_result["details"][product_type] = {
-                    "success": result.get("success", False),
-                    "created_reports": result.get("created_reports", 0),
-                    "message": result.get("message", "")
-                }
-                
-                # 如果至少有一種類型成功，則整體結果為成功
-                if result.get("success", False):
-                    at_least_one_success = True
-                    
-                # 更新合計數據
-                user_result_stats["total_profiles"] = max(user_result_stats["total_profiles"], result.get("total_profiles", 0))
-                user_result_stats["processed_profiles"] += result.get("processed_profiles", 0)
-                combined_result["created_reports"] += result.get("created_reports", 0)
-                
-                # 合併失敗的配置檔案
-                if "failed_profiles" in result:
-                    combined_result["failed_profiles"].extend(result["failed_profiles"])
-                
-            except Exception as e:
-                logger.error(f"處理 {product_type} 時出錯: {str(e)}")
-                logger.error(traceback.format_exc())
-                
-                # 記錄錯誤
-                combined_result["details"][product_type] = {
-                    "success": False,
-                    "created_reports": 0,
-                    "message": f"Error: {str(e)}"
-                }
-        
-        combined_result["total_profiles"] = user_result_stats["total_profiles"]
-        combined_result["processed_profiles"] += user_result_stats["processed_profiles"]
-    
-    # 設置整體結果的成功狀態
-    combined_result["success"] = at_least_one_success
-    
-    # 創建摘要信息
-    if combined_result["created_reports"] > 0:
-        if profile_id and user_id:
-            combined_result["message"] = (
-                f"Successfully created {combined_result['created_reports']} reports "
-                f"from {combined_result['processed_profiles']} profiles "
-                f"across {len([t for t, r in combined_result['details'].items() if r['success']])} ad types"
-            )
-        elif profile_id:
-            combined_result["message"] = (
-                f"Successfully created {combined_result['created_reports']} reports "
-                f"across {len([t for t, r in combined_result['details'].items() if r['success']])} ad types"
-            )
-        elif user_id:
-            combined_result["message"] = (
-                f"Successfully created {combined_result['created_reports']} reports "
-                f"from {combined_result['processed_profiles']} of {combined_result['total_profiles']} profiles "
-                f"across {len([t for t, r in combined_result['details'].items() if r['success']])} ad types"
-            )
-        else:  # 所有 profiles
-            combined_result["message"] = (
-                f"Successfully created {combined_result['created_reports']} reports "
-                f"from {combined_result['processed_profiles']} of {combined_result['total_profiles']} profiles "
-                f"across {len([t for t, r in combined_result['details'].items() if r['success']])} ad types"
-            )
-    else:
-        combined_result["message"] = "No reports were created"
-    
-    # 檢查是否有錯誤條件
-    if not at_least_one_success:
-        logger.warning(f"申請報告失敗: {combined_result['message']}")
-        
-        if profile_id:
-            for product_type, result in combined_result["details"].items():
-                if "Connection not found" in result.get("message", ""):
-                    raise HTTPException(status_code=404, detail="Connection not found for this profile")
-        else:  # user_id
-            for product_type, result in combined_result["details"].items():
-                if "No Amazon Ads connections found" in result.get("message", ""):
-                    raise HTTPException(status_code=404, detail="No Amazon Ads connections found for this user")
-        
-        # 其他錯誤返回400
-        raise HTTPException(status_code=400, detail=combined_result["message"])
-    
-    return combined_result
+    except HTTPException:
+        # 重新拋出 HTTP 異常
+        raise
+    except Exception as e:
+        logger.error(f"申請廣告活動報告時出錯: {str(e)}")
+        logger.error(traceback.format_exc())
+        raise HTTPException(status_code=500, detail=f"Internal server error: {str(e)}")
