@@ -79,92 +79,160 @@ async def check_and_process_reports(
     
     report_processor = ReportProcessor(amazon_ads_service)
     
-    # 如果提供了特定的 report_id，則只處理該報告
-    if report_id:
-        logger.info(f"檢查特定報告: {report_id}")
-        try:
-            result = await report_processor.process_report(report_id)
-            
-            # 將單個報告結果包裝為一致的格式
-            return {
-                "total_reports": 1,
-                "processed_reports": 1 if result.get('download_status') == DownloadStatus.COMPLETED.value else 0,
-                "failed_reports": 0 if result.get('download_status') == DownloadStatus.COMPLETED.value else 1,
-                "details": [result]
-            }
-        except ValueError as e:
-            raise HTTPException(status_code=404, detail=str(e))
-        except Exception as e:
-            logger.error(f"檢查報告 {report_id} 時出錯: {str(e)}")
-            logger.error(traceback.format_exc())
-            raise HTTPException(status_code=500, detail=f"處理報告時出錯: {str(e)}")
-    
-    # 否則處理所有待處理的報告
-    else:
-        logger.info("開始檢查和處理待處理的報告")
+    try:
+        # 統一的查詢邏輯
+        reports_to_process = await _get_reports_to_process(
+            report_id=report_id,
+            user_id=user_id,
+            profile_id=profile_id,
+            limit=limit
+        )
         
-        try:
-            # 構建查詢
-            query = supabase.table('amazon_ads_reports').select('*')
+        # 初始化結果結構
+        result = {
+            "total_reports": len(reports_to_process),
+            "processed_reports": 0,
+            "failed_reports": 0,
+            "details": []
+        }
+        
+        # 處理每個報告
+        for report in reports_to_process:
+            report_result = await _process_single_report(
+                report_processor, 
+                report['report_id'],
+                report.get('status')
+            )
             
-            query = query.eq('status', ReportStatus.PENDING.value)
-            
-            # 如果指定了用戶 ID，則添加過濾條件
-            if user_id:
-                query = query.eq('user_id', user_id)
-                
-            # 如果指定了配置檔案 ID，則添加過濾條件
-            if profile_id:
-                query = query.eq('profile_id', profile_id)
-                
-            # 執行查詢
-            reports_result = query.limit(limit).execute()
-            pending_reports = reports_result.data
-            
-            # 處理結果
-            result = {
-                "total_reports": len(pending_reports),
-                "processed_reports": 0,
-                "failed_reports": 0,
-                "details": []
-            }
-            
-            # 處理每個報告
-            for report in pending_reports:
-                try:
-                    report_result = await report_processor.process_report(report['report_id']) 
+            # 更新計數和詳細信息
+            _update_result_counts(result, report_result)
+            result["details"].append(report_result)
+        
+        return result
+        
+    except ValueError as e:
+        # 特定報告不存在的情況
+        raise HTTPException(status_code=404, detail=str(e))
+    except Exception as e:
+        # 其他錯誤
+        logger.error(f"處理報告時出錯: {str(e)}")
+        logger.error(traceback.format_exc())
+        raise HTTPException(status_code=500, detail=f"處理報告時出錯: {str(e)}")
 
-                    # 更新計數
-                    if report_result.get('download_status') == DownloadStatus.COMPLETED.value:
-                        result["processed_reports"] += 1
-                    else:
-                        result["failed_reports"] += 1
-                        
-                    # 添加詳細信息
-                    result["details"].append(report_result)
-                    
-                except Exception as e:
-                    logger.error(f"處理報告 {report['report_id']} 時出錯: {str(e)}")
-                    logger.error(traceback.format_exc())
-                    
-                    # 更新計數
-                    result["failed_reports"] += 1
-                    
-                    # 添加詳細信息
-                    result["details"].append({
-                        "report_id": report['report_id'],
-                        "status": report.get('status'),
-                        "download_status": DownloadStatus.FAILED.value,
-                        "message": f"處理出錯: {str(e)}"
-                    })
+
+async def _get_reports_to_process(
+    report_id: Optional[str],
+    user_id: Optional[str],
+    profile_id: Optional[str],
+    limit: int
+) -> list:
+    """
+    獲取需要處理的報告列表
+    
+    參數:
+        report_id: 特定報告 ID (最高優先級)
+        user_id: 用戶 ID (最低優先級)
+        profile_id: 配置檔案 ID (中間優先級)
+        limit: 最大數量限制
+        
+    返回:
+        報告列表
+    
+    優先級順序:
+    1. 如果提供 report_id，僅查詢該特定報告
+    2. 如果無 report_id 但有 profile_id，僅根據 profile_id 查詢
+    3. 如果無 report_id 和 profile_id 但有 user_id，僅根據 user_id 查詢
+    4. 如果都沒有提供，則返回所有待處理 (PENDING) 的報告
+    
+    錯誤處理:
+    - 當指定條件查詢結果為空時，會拋出 ValueError 錯誤
+    """
+    # 建立基本查詢
+    query = supabase.table('amazon_ads_reports').select('*')
+    
+    # 根據優先級順序添加過濾條件
+    if report_id:
+        logger.info(f"根據報告 ID 查詢: {report_id}")
+        query = query.eq('report_id', report_id)
+        result = query.execute()
+        if not result.data:
+            raise ValueError(f"報告 {report_id} 不存在")
             
-            # 返回結果
-            return result
+        return result.data
+        
+    elif profile_id:
+        logger.info(f"根據配置檔案 ID 查詢: {profile_id}")
+        query = query.eq('profile_id', profile_id)
+        result = query.execute()
+        if not result.data:
+            raise ValueError(f"配置檔案 {profile_id} 沒有相關報告")
             
-        except Exception as e:
-            logger.error(f"批量處理報告時出錯: {str(e)}")
-            logger.error(traceback.format_exc())
-            raise HTTPException(status_code=500, detail=f"批量處理報告時出錯: {str(e)}")
+        return result.data
+        
+    elif user_id:
+        logger.info(f"根據用戶 ID 查詢: {user_id}")
+        query = query.eq('user_id', user_id)
+        result = query.execute()
+        if not result.data:
+            raise ValueError(f"用戶 {user_id} 沒有相關報告")
+            
+        return result.data
+        
+    else:
+        # 如果沒有提供任何特定條件，則只查詢待處理的報告
+        logger.info("查詢所有待處理的報告")
+        query = query.eq('status', ReportStatus.PENDING.value)
+    
+    # 添加限制並執行查詢
+    result = query.limit(limit).execute()
+    return result.data
+
+
+async def _process_single_report(
+    report_processor: ReportProcessor, 
+    report_id: str,
+    current_status: Optional[str] = None
+) -> dict:
+    """
+    處理單個報告並返回統一格式的結果
+    
+    參數:
+        report_processor: 報告處理器實例
+        report_id: 報告 ID
+        current_status: 報告當前狀態
+        
+    返回:
+        處理結果字典
+    """
+    try:
+        report_result = await report_processor.process_report(report_id)
+        return report_result
+        
+    except Exception as e:
+        logger.error(f"處理報告 {report_id} 時出錯: {str(e)}")
+        logger.error(traceback.format_exc())
+        
+        # 返回錯誤結果
+        return {
+            "report_id": report_id,
+            "status": current_status,
+            "download_status": DownloadStatus.FAILED.value,
+            "message": f"處理出錯: {str(e)}"
+        }
+
+
+def _update_result_counts(result: dict, report_result: dict) -> None:
+    """
+    根據報告處理結果更新計數
+    
+    參數:
+        result: 總結果字典
+        report_result: 單個報告的處理結果
+    """
+    if report_result.get('download_status') == DownloadStatus.COMPLETED.value:
+        result["processed_reports"] += 1
+    else:
+        result["failed_reports"] += 1
 
 @router.post(
     "/campaigns/",
