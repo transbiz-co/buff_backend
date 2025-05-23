@@ -212,6 +212,8 @@ async def check_and_process_reports(
         404: {"description": "未找到用戶或連接檔案"}
     }
 )
+
+# TODO: 有重構空間：太多重複判斷
 async def sync_amazon_advertising_campaign_reports(
     start_date: str = Query(..., description="報告開始日期 (YYYY-MM-DD)"),
     end_date: str = Query(..., description="報告結束日期 (YYYY-MM-DD)"),
@@ -234,6 +236,8 @@ async def sync_amazon_advertising_campaign_reports(
     """
     logger.info(f"開始申請廣告活動報告 start_date={start_date}, end_date={end_date}, user_id={user_id}, profile_id={profile_id}, ad_product={ad_product}")
     
+    # 創建 ReportProcessor 實例
+    report_processor = ReportProcessor(amazon_ads_service)
     
     try:
         datetime.strptime(start_date, "%Y-%m-%d")

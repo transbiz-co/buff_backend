@@ -22,13 +22,14 @@ class ReportProcessor:
     def __init__(self, amazon_ads_service):
         self.amazon_ads_service = amazon_ads_service
     
+    # TODO: 有重構空間，425 的意思是代表 Amazon 方面已經接收到申請正在產生報表，而 Amazon 的系統那端已經有此 id 而這次的申請就成了重複申請的意思，所以不應該用指數退避機制去重複打 Amazon 申請報表的 API，應該改成確認我們資料庫(Supabase)當中也有這筆申請紀錄就好，如果沒有就將這筆記錄抓下來保存進資料庫中就好，然後用 log 記錄一下中間發生什麼事情方便我 debug 就好，應該不用這麼複雜的判斷式
     async def create_campaign_reports(self, 
                                 profile_id: str, 
                                 ad_product: str,
                                 start_date: Optional[str] = None, 
                                 end_date: Optional[str] = None) -> Dict[str, Any]:
         """
-        為 profile 申請 campaign report
+        為 profile 申請 spCampaign, sbCampaign, sdCampaign report
         
         Args:
             profile_id: Amazon Ads 配置檔案 ID
