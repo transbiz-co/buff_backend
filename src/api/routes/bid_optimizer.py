@@ -105,8 +105,27 @@ def calculate_metrics(data: Dict[str, Any]) -> Dict[str, Any]:
     clicks = data.get("clicks", 0) or 0
     orders = data.get("orders", 0) or 0
     units = data.get("units", 0) or 0
-    cost = Decimal(str(data.get("cost", 0) or 0))
-    sales = Decimal(str(data.get("sales", 0) or 0))
+    
+    # 加強類型轉換和 null 值處理
+    try:
+        cost_value = data.get("cost", 0)
+        if cost_value is None or cost_value == "":
+            cost = Decimal("0")
+        else:
+            cost = Decimal(str(cost_value))
+    except (ValueError, TypeError):
+        logger.warning(f"Invalid cost value: {data.get('cost')}")
+        cost = Decimal("0")
+    
+    try:
+        sales_value = data.get("sales", 0)
+        if sales_value is None or sales_value == "":
+            sales = Decimal("0")
+        else:
+            sales = Decimal(str(sales_value))
+    except (ValueError, TypeError):
+        logger.warning(f"Invalid sales value: {data.get('sales')}")
+        sales = Decimal("0")
     
     # 計算衍生指標，處理除零情況
     acos = (cost / sales * 100) if sales > 0 else None
@@ -582,12 +601,36 @@ async def get_bid_optimizer_data(
                         'sales': 0
                     }
                 
+                # 添加調試日誌和更強大的數據提取
+                try:
+                    cost_raw = row.get('cost')
+                    if cost_raw is None or cost_raw == '':
+                        cost_value = 0.0
+                    else:
+                        cost_value = float(cost_raw)
+                except (ValueError, TypeError) as e:
+                    logger.warning(f"SP Campaign {campaign_id}: Invalid cost value: {row.get('cost')}, error: {e}")
+                    cost_value = 0.0
+                
+                try:
+                    sales_raw = row.get('sales7d')
+                    if sales_raw is None or sales_raw == '':
+                        sales_value = 0.0
+                    else:
+                        sales_value = float(sales_raw)
+                except (ValueError, TypeError) as e:
+                    logger.warning(f"SP Campaign {campaign_id}: Invalid sales7d value: {row.get('sales7d')}, error: {e}")
+                    sales_value = 0.0
+                
+                if campaign_id and (cost_value > 0 or sales_value > 0):
+                    logger.info(f"SP Campaign {campaign_id}: cost={cost_value}, sales7d={sales_value}")
+                
                 campaigns_data[campaign_id]['impressions'] += row.get('impressions', 0) or 0
                 campaigns_data[campaign_id]['clicks'] += row.get('clicks', 0) or 0
                 campaigns_data[campaign_id]['orders'] += row.get('purchases7d', 0) or 0
                 campaigns_data[campaign_id]['units'] += row.get('unitsSoldClicks7d', 0) or 0
-                campaigns_data[campaign_id]['cost'] += float(row.get('cost', 0) or 0)
-                campaigns_data[campaign_id]['sales'] += float(row.get('sales7d', 0) or 0)
+                campaigns_data[campaign_id]['cost'] += cost_value
+                campaigns_data[campaign_id]['sales'] += sales_value
         
         # 處理 SB campaigns
         if not filter_dict.get('adType') or 'SB' in filter_dict.get('adType', []):
@@ -623,12 +666,18 @@ async def get_bid_optimizer_data(
                         'sales': 0
                     }
                 
+                # 添加調試日誌
+                cost_value = row.get('cost', 0) or 0
+                sales_value = row.get('sales', 0) or 0
+                if campaign_id and (cost_value > 0 or sales_value > 0):
+                    logger.debug(f"SB Campaign {campaign_id}: cost={cost_value}, sales={sales_value}")
+                
                 campaigns_data[campaign_id]['impressions'] += row.get('impressions', 0) or 0
                 campaigns_data[campaign_id]['clicks'] += row.get('clicks', 0) or 0
                 campaigns_data[campaign_id]['orders'] += row.get('purchases', 0) or 0
                 campaigns_data[campaign_id]['units'] += row.get('unitsSold', 0) or 0
-                campaigns_data[campaign_id]['cost'] += float(row.get('cost', 0) or 0)
-                campaigns_data[campaign_id]['sales'] += float(row.get('sales', 0) or 0)
+                campaigns_data[campaign_id]['cost'] += float(cost_value)
+                campaigns_data[campaign_id]['sales'] += float(sales_value)
         
         # 處理 SD campaigns
         if not filter_dict.get('adType') or 'SD' in filter_dict.get('adType', []):
@@ -664,17 +713,29 @@ async def get_bid_optimizer_data(
                         'sales': 0
                     }
                 
+                # 添加調試日誌
+                cost_value = row.get('cost', 0) or 0
+                sales_value = row.get('sales', 0) or 0
+                if campaign_id and (cost_value > 0 or sales_value > 0):
+                    logger.debug(f"SD Campaign {campaign_id}: cost={cost_value}, sales={sales_value}")
+                
                 campaigns_data[campaign_id]['impressions'] += row.get('impressions', 0) or 0
                 campaigns_data[campaign_id]['clicks'] += row.get('clicks', 0) or 0
                 campaigns_data[campaign_id]['orders'] += row.get('purchases', 0) or 0
                 campaigns_data[campaign_id]['units'] += row.get('unitsSold', 0) or 0
-                campaigns_data[campaign_id]['cost'] += float(row.get('cost', 0) or 0)
-                campaigns_data[campaign_id]['sales'] += float(row.get('sales', 0) or 0)
+                campaigns_data[campaign_id]['cost'] += float(cost_value)
+                campaigns_data[campaign_id]['sales'] += float(sales_value)
         
         # 轉換 campaign 數據為列表
         campaigns = []
         for campaign_data in campaigns_data.values():
             metrics = calculate_metrics(campaign_data)
+            
+            # 添加調試日誌檢查最終數據
+            if campaign_data['cost'] > 0 or campaign_data['sales'] > 0:
+                logger.info(f"Campaign {campaign_data['campaignId']} final data: cost={campaign_data['cost']}, sales={campaign_data['sales']}")
+                logger.info(f"Campaign {campaign_data['campaignId']} metrics: spend={metrics.get('spend')}, sales={metrics.get('sales')}")
+            
             campaign = CampaignData(
                 campaignId=campaign_data['campaignId'],
                 campaignName=campaign_data['campaignName'],
