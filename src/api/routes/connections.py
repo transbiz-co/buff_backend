@@ -420,28 +420,39 @@ async def get_connection_status(
         response_data = {"connected": False, "user_id": user_id, "profiles": []}
         return response_data
     
-    # 構建配置檔案列表
+    # 構建配置檔案列表 - 只包含支援的國家帳號
     profiles = []
-    for conn in connections:
-        profiles.append(AmazonAdsProfile(
-            profile_id=conn.profile_id,
-            country_code=conn.country_code,
-            currency_code=conn.currency_code,
-            marketplace_id=conn.marketplace_id,
-            account_name=conn.account_name,
-            account_type=conn.account_type,
-            is_active=conn.is_active,
-            timezone="",  # 可選字段
-            main_account_id=conn.main_account_id,
-            main_account_name=conn.main_account_name,
-            main_account_email=conn.main_account_email,
-            # 添加時間欄位
-            created_at=conn.created_at.isoformat() if hasattr(conn, 'created_at') and conn.created_at else None,
-            updated_at=conn.updated_at.isoformat() if hasattr(conn, 'updated_at') and conn.updated_at else None
-        ))
+    total_connections = len(connections)
+    supported_connections = 0
     
+    for conn in connections:
+        # 只處理支援的國家帳號
+        if conn.country_code in settings.SUPPORTED_COUNTRIES:
+            supported_connections += 1
+            profiles.append(AmazonAdsProfile(
+                profile_id=conn.profile_id,
+                country_code=conn.country_code,
+                currency_code=conn.currency_code,
+                marketplace_id=conn.marketplace_id,
+                account_name=conn.account_name,
+                account_type=conn.account_type,
+                is_active=conn.is_active,
+                timezone="",  # 可選字段
+                main_account_id=conn.main_account_id,
+                main_account_name=conn.main_account_name,
+                main_account_email=conn.main_account_email,
+                # 添加時間欄位
+                created_at=conn.created_at.isoformat() if hasattr(conn, 'created_at') and conn.created_at else None,
+                updated_at=conn.updated_at.isoformat() if hasattr(conn, 'updated_at') and conn.updated_at else None
+            ))
+    
+    # 記錄篩選前後的帳號數量
+    supported_countries_str = ", ".join(settings.SUPPORTED_COUNTRIES)
+    logger.info(f"用戶 {user_id} 共有 {total_connections} 個連接，篩選後剩餘 {supported_connections} 個支援的帳號 (支援國家: {supported_countries_str})")
+    
+    # 如果篩選後沒有支援的國家帳號，connected 狀態應該反映這一點
     response_data = {
-        "connected": True,
+        "connected": len(profiles) > 0,  # 只有當有支援的國家帳號時才視為已連接
         "user_id": user_id,
         "profiles": profiles
     }
