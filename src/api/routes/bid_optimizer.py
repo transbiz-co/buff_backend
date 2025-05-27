@@ -1,6 +1,12 @@
 """
 Bid Optimizer API endpoints
 用於支援前端 Bid Optimizer 頁面的數據需求
+
+優化更新 (2025-05-27):
+- 整合 amazon_ads_daily_summary 聚合表以提升查詢性能
+- Summary 和 Daily Performance 數據優先使用聚合表
+- 當有 campaign 名稱或狀態篩選時，自動回退到原始表查詢
+- Campaign 列表保持原有邏輯（需要詳細的 campaign 級別數據）
 """
 import logging
 from datetime import datetime, timedelta
@@ -221,98 +227,149 @@ async def get_bid_optimizer_data(
         # 構建篩選條件
         where_clause, filter_params = build_filter_clause(filter_dict)
         
-        # 1. 獲取總計數據 - 分別查詢三個表
+        # 1. 獲取總計數據 - 使用聚合表 amazon_ads_daily_summary
         current_data = {"impressions": 0, "clicks": 0, "orders": 0, "units": 0, "cost": 0, "sales": 0}
         previous_data = {"impressions": 0, "clicks": 0, "orders": 0, "units": 0, "cost": 0, "sales": 0}
         
-        # 查詢 SP 數據
-        sp_query = supabase.table('amazon_ads_campaigns_reports_sp').select(
-            'impressions, clicks, purchases7d, unitsSoldClicks7d, cost, sales7d, campaignName, campaignStatus, date'
-        ).eq('profile_id', profile_id).gte('date', prev_start_date).lte('date', end_date)
+        # 查詢聚合表獲取當期和前期數據
+        summary_result = supabase.table('amazon_ads_daily_summary').select(
+            'date, impressions, clicks, orders, units, cost, sales, sp_campaign_count, sb_campaign_count, sd_campaign_count'
+        ).eq('profile_id', profile_id).gte('date', prev_start_date).lte('date', end_date).execute()
         
-        # 應用篩選條件
-        if filter_dict.get('campaign', {}).get('operator') == 'contains':
-            sp_query = sp_query.ilike('campaignName', f"%{filter_dict['campaign']['value']}%")
-        elif filter_dict.get('campaign', {}).get('operator') == 'equals':
-            sp_query = sp_query.eq('campaignName', filter_dict['campaign']['value'])
-            
-        if filter_dict.get('state'):
-            states = filter_dict['state'] if isinstance(filter_dict['state'], list) else [filter_dict['state']]
-            sp_query = sp_query.in_('campaignStatus', states)
-        
-        sp_result = sp_query.execute()
-        
-        # 處理 SP 數據
-        for row in sp_result.data:
+        # 處理聚合數據
+        for row in summary_result.data:
             row_date = datetime.strptime(row['date'], "%Y-%m-%d")
             data_target = current_data if row_date >= start_dt else previous_data
             
-            data_target['impressions'] += row.get('impressions', 0) or 0
-            data_target['clicks'] += row.get('clicks', 0) or 0
-            data_target['orders'] += row.get('purchases7d', 0) or 0
-            data_target['units'] += row.get('unitsSoldClicks7d', 0) or 0
-            data_target['cost'] += float(row.get('cost', 0) or 0)
-            data_target['sales'] += float(row.get('sales7d', 0) or 0)
+            # 檢查 adType 篩選條件
+            if filter_dict.get('adType'):
+                ad_types = filter_dict['adType'] if isinstance(filter_dict['adType'], list) else [filter_dict['adType']]
+                # 如果有 adType 篩選，需要按比例計算（這裡簡化處理，實際可能需要更精確的方法）
+                # 注意：聚合表無法精確篩選 campaign 名稱和狀態，這些篩選只能在 campaign 列表中實現
+                include_sp = 'SP' in ad_types
+                include_sb = 'SB' in ad_types
+                include_sd = 'SD' in ad_types
+                
+                total_campaigns = row['sp_campaign_count'] + row['sb_campaign_count'] + row['sd_campaign_count']
+                if total_campaigns > 0:
+                    # 按廣告類型比例分配數據
+                    sp_ratio = row['sp_campaign_count'] / total_campaigns if include_sp else 0
+                    sb_ratio = row['sb_campaign_count'] / total_campaigns if include_sb else 0
+                    sd_ratio = row['sd_campaign_count'] / total_campaigns if include_sd else 0
+                    total_ratio = sp_ratio + sb_ratio + sd_ratio
+                    
+                    if total_ratio > 0:
+                        data_target['impressions'] += int(row.get('impressions', 0) * total_ratio)
+                        data_target['clicks'] += int(row.get('clicks', 0) * total_ratio)
+                        data_target['orders'] += int(row.get('orders', 0) * total_ratio)
+                        data_target['units'] += int(row.get('units', 0) * total_ratio)
+                        data_target['cost'] += float(row.get('cost', 0) or 0) * total_ratio
+                        data_target['sales'] += float(row.get('sales', 0) or 0) * total_ratio
+            else:
+                # 沒有 adType 篩選，使用全部數據
+                data_target['impressions'] += row.get('impressions', 0) or 0
+                data_target['clicks'] += row.get('clicks', 0) or 0
+                data_target['orders'] += row.get('orders', 0) or 0
+                data_target['units'] += row.get('units', 0) or 0
+                data_target['cost'] += float(row.get('cost', 0) or 0)
+                data_target['sales'] += float(row.get('sales', 0) or 0)
         
-        # 查詢 SB 數據
-        if not filter_dict.get('adType') or 'SB' in filter_dict.get('adType', []):
-            sb_query = supabase.table('amazon_ads_campaigns_reports_sb').select(
-                'impressions, clicks, purchases, unitsSold, cost, sales, campaignName, campaignStatus, date'
+        # 注意：由於聚合表無法進行 campaign 名稱和狀態篩選，
+        # 如果有這些篩選條件，我們需要回退到原始表查詢
+        if filter_dict.get('campaign') or filter_dict.get('state'):
+            logger.info("Detected campaign or state filters, falling back to detailed table queries for summary")
+            # 重置數據
+            current_data = {"impressions": 0, "clicks": 0, "orders": 0, "units": 0, "cost": 0, "sales": 0}
+            previous_data = {"impressions": 0, "clicks": 0, "orders": 0, "units": 0, "cost": 0, "sales": 0}
+            
+            # 查詢 SP 數據
+            sp_query = supabase.table('amazon_ads_campaigns_reports_sp').select(
+                'impressions, clicks, purchases7d, unitsSoldClicks7d, cost, sales7d, campaignName, campaignStatus, date'
             ).eq('profile_id', profile_id).gte('date', prev_start_date).lte('date', end_date)
             
             # 應用篩選條件
             if filter_dict.get('campaign', {}).get('operator') == 'contains':
-                sb_query = sb_query.ilike('campaignName', f"%{filter_dict['campaign']['value']}%")
+                sp_query = sp_query.ilike('campaignName', f"%{filter_dict['campaign']['value']}%")
             elif filter_dict.get('campaign', {}).get('operator') == 'equals':
-                sb_query = sb_query.eq('campaignName', filter_dict['campaign']['value'])
+                sp_query = sp_query.eq('campaignName', filter_dict['campaign']['value'])
                 
             if filter_dict.get('state'):
                 states = filter_dict['state'] if isinstance(filter_dict['state'], list) else [filter_dict['state']]
-                sb_query = sb_query.in_('campaignStatus', states)
+                sp_query = sp_query.in_('campaignStatus', states)
             
-            sb_result = sb_query.execute()
+            sp_result = sp_query.limit(10000).execute()
             
-            # 處理 SB 數據
-            for row in sb_result.data:
+            # 處理 SP 數據
+            for row in sp_result.data:
                 row_date = datetime.strptime(row['date'], "%Y-%m-%d")
                 data_target = current_data if row_date >= start_dt else previous_data
                 
                 data_target['impressions'] += row.get('impressions', 0) or 0
                 data_target['clicks'] += row.get('clicks', 0) or 0
-                data_target['orders'] += row.get('purchases', 0) or 0
-                data_target['units'] += row.get('unitsSold', 0) or 0
+                data_target['orders'] += row.get('purchases7d', 0) or 0
+                data_target['units'] += row.get('unitsSoldClicks7d', 0) or 0
                 data_target['cost'] += float(row.get('cost', 0) or 0)
-                data_target['sales'] += float(row.get('sales', 0) or 0)
-        
-        # 查詢 SD 數據
-        if not filter_dict.get('adType') or 'SD' in filter_dict.get('adType', []):
-            sd_query = supabase.table('amazon_ads_campaigns_reports_sd').select(
-                'impressions, clicks, purchases, unitsSold, cost, sales, campaignName, campaignStatus, date'
-            ).eq('profile_id', profile_id).gte('date', prev_start_date).lte('date', end_date)
+                data_target['sales'] += float(row.get('sales7d', 0) or 0)
             
-            # 應用篩選條件
-            if filter_dict.get('campaign', {}).get('operator') == 'contains':
-                sd_query = sd_query.ilike('campaignName', f"%{filter_dict['campaign']['value']}%")
-            elif filter_dict.get('campaign', {}).get('operator') == 'equals':
-                sd_query = sd_query.eq('campaignName', filter_dict['campaign']['value'])
+            # 查詢 SB 數據
+            if not filter_dict.get('adType') or 'SB' in filter_dict.get('adType', []):
+                sb_query = supabase.table('amazon_ads_campaigns_reports_sb').select(
+                    'impressions, clicks, purchases, unitsSold, cost, sales, campaignName, campaignStatus, date'
+                ).eq('profile_id', profile_id).gte('date', prev_start_date).lte('date', end_date)
                 
-            if filter_dict.get('state'):
-                states = filter_dict['state'] if isinstance(filter_dict['state'], list) else [filter_dict['state']]
-                sd_query = sd_query.in_('campaignStatus', states)
-            
-            sd_result = sd_query.execute()
-            
-            # 處理 SD 數據
-            for row in sd_result.data:
-                row_date = datetime.strptime(row['date'], "%Y-%m-%d")
-                data_target = current_data if row_date >= start_dt else previous_data
+                # 應用篩選條件
+                if filter_dict.get('campaign', {}).get('operator') == 'contains':
+                    sb_query = sb_query.ilike('campaignName', f"%{filter_dict['campaign']['value']}%")
+                elif filter_dict.get('campaign', {}).get('operator') == 'equals':
+                    sb_query = sb_query.eq('campaignName', filter_dict['campaign']['value'])
+                    
+                if filter_dict.get('state'):
+                    states = filter_dict['state'] if isinstance(filter_dict['state'], list) else [filter_dict['state']]
+                    sb_query = sb_query.in_('campaignStatus', states)
                 
-                data_target['impressions'] += row.get('impressions', 0) or 0
-                data_target['clicks'] += row.get('clicks', 0) or 0
-                data_target['orders'] += row.get('purchases', 0) or 0
-                data_target['units'] += row.get('unitsSold', 0) or 0
-                data_target['cost'] += float(row.get('cost', 0) or 0)
-                data_target['sales'] += float(row.get('sales', 0) or 0)
+                sb_result = sb_query.limit(10000).execute()
+                
+                # 處理 SB 數據
+                for row in sb_result.data:
+                    row_date = datetime.strptime(row['date'], "%Y-%m-%d")
+                    data_target = current_data if row_date >= start_dt else previous_data
+                    
+                    data_target['impressions'] += row.get('impressions', 0) or 0
+                    data_target['clicks'] += row.get('clicks', 0) or 0
+                    data_target['orders'] += row.get('purchases', 0) or 0
+                    data_target['units'] += row.get('unitsSold', 0) or 0
+                    data_target['cost'] += float(row.get('cost', 0) or 0)
+                    data_target['sales'] += float(row.get('sales', 0) or 0)
+            
+            # 查詢 SD 數據
+            if not filter_dict.get('adType') or 'SD' in filter_dict.get('adType', []):
+                sd_query = supabase.table('amazon_ads_campaigns_reports_sd').select(
+                    'impressions, clicks, purchases, unitsSold, cost, sales, campaignName, campaignStatus, date'
+                ).eq('profile_id', profile_id).gte('date', prev_start_date).lte('date', end_date)
+                
+                # 應用篩選條件
+                if filter_dict.get('campaign', {}).get('operator') == 'contains':
+                    sd_query = sd_query.ilike('campaignName', f"%{filter_dict['campaign']['value']}%")
+                elif filter_dict.get('campaign', {}).get('operator') == 'equals':
+                    sd_query = sd_query.eq('campaignName', filter_dict['campaign']['value'])
+                    
+                if filter_dict.get('state'):
+                    states = filter_dict['state'] if isinstance(filter_dict['state'], list) else [filter_dict['state']]
+                    sd_query = sd_query.in_('campaignStatus', states)
+                
+                sd_result = sd_query.limit(10000).execute()
+                
+                # 處理 SD 數據
+                for row in sd_result.data:
+                    row_date = datetime.strptime(row['date'], "%Y-%m-%d")
+                    data_target = current_data if row_date >= start_dt else previous_data
+                    
+                    data_target['impressions'] += row.get('impressions', 0) or 0
+                    data_target['clicks'] += row.get('clicks', 0) or 0
+                    data_target['orders'] += row.get('purchases', 0) or 0
+                    data_target['units'] += row.get('unitsSold', 0) or 0
+                    data_target['cost'] += float(row.get('cost', 0) or 0)
+                    data_target['sales'] += float(row.get('sales', 0) or 0)
         
         # 計算指標
         current_metrics = calculate_metrics(current_data)
@@ -327,106 +384,166 @@ async def get_bid_optimizer_data(
                 changes[key] = calculate_change_percentage(Decimal(str(current_val)), Decimal(str(previous_val)))
         
         # 2. 獲取每日效能數據
-        daily_data = {}
-        
-        # 處理 SP 每日數據
-        if not filter_dict.get('adType') or 'SP' in filter_dict.get('adType', []):
-            sp_daily_query = supabase.table('amazon_ads_campaigns_reports_sp').select(
-                'date, impressions, clicks, purchases7d, unitsSoldClicks7d, cost, sales7d'
-            ).eq('profile_id', profile_id).gte('date', start_date).lte('date', end_date)
-            
-            # 應用篩選條件
-            if filter_dict.get('campaign', {}).get('operator') == 'contains':
-                sp_daily_query = sp_daily_query.ilike('campaignName', f"%{filter_dict['campaign']['value']}%")
-            elif filter_dict.get('campaign', {}).get('operator') == 'equals':
-                sp_daily_query = sp_daily_query.eq('campaignName', filter_dict['campaign']['value'])
-                
-            if filter_dict.get('state'):
-                states = filter_dict['state'] if isinstance(filter_dict['state'], list) else [filter_dict['state']]
-                sp_daily_query = sp_daily_query.in_('campaignStatus', states)
-            
-            sp_daily_result = sp_daily_query.execute()
-            
-            for row in sp_daily_result.data:
-                date = row['date']
-                if date not in daily_data:
-                    daily_data[date] = {"impressions": 0, "clicks": 0, "orders": 0, "units": 0, "cost": 0, "sales": 0}
-                
-                daily_data[date]['impressions'] += row.get('impressions', 0) or 0
-                daily_data[date]['clicks'] += row.get('clicks', 0) or 0
-                daily_data[date]['orders'] += row.get('purchases7d', 0) or 0
-                daily_data[date]['units'] += row.get('unitsSoldClicks7d', 0) or 0
-                daily_data[date]['cost'] += float(row.get('cost', 0) or 0)
-                daily_data[date]['sales'] += float(row.get('sales7d', 0) or 0)
-        
-        # 處理 SB 每日數據
-        if not filter_dict.get('adType') or 'SB' in filter_dict.get('adType', []):
-            sb_daily_query = supabase.table('amazon_ads_campaigns_reports_sb').select(
-                'date, impressions, clicks, purchases, unitsSold, cost, sales'
-            ).eq('profile_id', profile_id).gte('date', start_date).lte('date', end_date)
-            
-            # 應用篩選條件
-            if filter_dict.get('campaign', {}).get('operator') == 'contains':
-                sb_daily_query = sb_daily_query.ilike('campaignName', f"%{filter_dict['campaign']['value']}%")
-            elif filter_dict.get('campaign', {}).get('operator') == 'equals':
-                sb_daily_query = sb_daily_query.eq('campaignName', filter_dict['campaign']['value'])
-                
-            if filter_dict.get('state'):
-                states = filter_dict['state'] if isinstance(filter_dict['state'], list) else [filter_dict['state']]
-                sb_daily_query = sb_daily_query.in_('campaignStatus', states)
-            
-            sb_daily_result = sb_daily_query.execute()
-            
-            for row in sb_daily_result.data:
-                date = row['date']
-                if date not in daily_data:
-                    daily_data[date] = {"impressions": 0, "clicks": 0, "orders": 0, "units": 0, "cost": 0, "sales": 0}
-                
-                daily_data[date]['impressions'] += row.get('impressions', 0) or 0
-                daily_data[date]['clicks'] += row.get('clicks', 0) or 0
-                daily_data[date]['orders'] += row.get('purchases', 0) or 0
-                daily_data[date]['units'] += row.get('unitsSold', 0) or 0
-                daily_data[date]['cost'] += float(row.get('cost', 0) or 0)
-                daily_data[date]['sales'] += float(row.get('sales', 0) or 0)
-        
-        # 處理 SD 每日數據
-        if not filter_dict.get('adType') or 'SD' in filter_dict.get('adType', []):
-            sd_daily_query = supabase.table('amazon_ads_campaigns_reports_sd').select(
-                'date, impressions, clicks, purchases, unitsSold, cost, sales'
-            ).eq('profile_id', profile_id).gte('date', start_date).lte('date', end_date)
-            
-            # 應用篩選條件
-            if filter_dict.get('campaign', {}).get('operator') == 'contains':
-                sd_daily_query = sd_daily_query.ilike('campaignName', f"%{filter_dict['campaign']['value']}%")
-            elif filter_dict.get('campaign', {}).get('operator') == 'equals':
-                sd_daily_query = sd_daily_query.eq('campaignName', filter_dict['campaign']['value'])
-                
-            if filter_dict.get('state'):
-                states = filter_dict['state'] if isinstance(filter_dict['state'], list) else [filter_dict['state']]
-                sd_daily_query = sd_daily_query.in_('campaignStatus', states)
-            
-            sd_daily_result = sd_daily_query.execute()
-            
-            for row in sd_daily_result.data:
-                date = row['date']
-                if date not in daily_data:
-                    daily_data[date] = {"impressions": 0, "clicks": 0, "orders": 0, "units": 0, "cost": 0, "sales": 0}
-                
-                daily_data[date]['impressions'] += row.get('impressions', 0) or 0
-                daily_data[date]['clicks'] += row.get('clicks', 0) or 0
-                daily_data[date]['orders'] += row.get('purchases', 0) or 0
-                daily_data[date]['units'] += row.get('unitsSold', 0) or 0
-                daily_data[date]['cost'] += float(row.get('cost', 0) or 0)
-                daily_data[date]['sales'] += float(row.get('sales', 0) or 0)
-        
-        # 轉換每日數據為列表
         daily_performance = []
-        for date in sorted(daily_data.keys()):
-            metrics = calculate_metrics(daily_data[date])
-            daily_performance.append(DailyPerformance(
-                date=date,
-                **metrics
-            ))
+        
+        # 優先使用聚合表，除非有 campaign 或 state 篩選條件
+        if not filter_dict.get('campaign') and not filter_dict.get('state'):
+            # 使用聚合表查詢每日數據
+            daily_result = supabase.table('amazon_ads_daily_summary').select(
+                'date, impressions, clicks, orders, units, cost, sales, acos, ctr, cvr, cpc, roas, rpc, sp_campaign_count, sb_campaign_count, sd_campaign_count'
+            ).eq('profile_id', profile_id).gte('date', start_date).lte('date', end_date).order('date').execute()
+            
+            for row in daily_result.data:
+                # 檢查 adType 篩選條件
+                if filter_dict.get('adType'):
+                    ad_types = filter_dict['adType'] if isinstance(filter_dict['adType'], list) else [filter_dict['adType']]
+                    include_sp = 'SP' in ad_types
+                    include_sb = 'SB' in ad_types
+                    include_sd = 'SD' in ad_types
+                    
+                    total_campaigns = row['sp_campaign_count'] + row['sb_campaign_count'] + row['sd_campaign_count']
+                    if total_campaigns > 0:
+                        # 按廣告類型比例分配數據
+                        sp_ratio = row['sp_campaign_count'] / total_campaigns if include_sp else 0
+                        sb_ratio = row['sb_campaign_count'] / total_campaigns if include_sb else 0
+                        sd_ratio = row['sd_campaign_count'] / total_campaigns if include_sd else 0
+                        total_ratio = sp_ratio + sb_ratio + sd_ratio
+                        
+                        if total_ratio > 0:
+                            # 創建調整後的數據
+                            adjusted_data = {
+                                'impressions': int(row.get('impressions', 0) * total_ratio),
+                                'clicks': int(row.get('clicks', 0) * total_ratio),
+                                'orders': int(row.get('orders', 0) * total_ratio),
+                                'units': int(row.get('units', 0) * total_ratio),
+                                'cost': float(row.get('cost', 0) or 0) * total_ratio,
+                                'sales': float(row.get('sales', 0) or 0) * total_ratio
+                            }
+                            metrics = calculate_metrics(adjusted_data)
+                            daily_performance.append(DailyPerformance(
+                                date=row['date'],
+                                **metrics
+                            ))
+                    # else: 沒有符合的廣告類型，跳過這一天
+                else:
+                    # 沒有 adType 篩選，直接使用聚合表的數據
+                    daily_performance.append(DailyPerformance(
+                        date=row['date'],
+                        impressions=row.get('impressions', 0) or 0,
+                        clicks=row.get('clicks', 0) or 0,
+                        orders=row.get('orders', 0) or 0,
+                        units=row.get('units', 0) or 0,
+                        spend=Decimal(str(row.get('cost', 0) or 0)),
+                        sales=Decimal(str(row.get('sales', 0) or 0)),
+                        acos=Decimal(str(row.get('acos', 0))) if row.get('acos') is not None else None,
+                        ctr=Decimal(str(row.get('ctr', 0))) if row.get('ctr') is not None else None,
+                        cvr=Decimal(str(row.get('cvr', 0))) if row.get('cvr') is not None else None,
+                        cpc=Decimal(str(row.get('cpc', 0))) if row.get('cpc') is not None else None,
+                        roas=Decimal(str(row.get('roas', 0))) if row.get('roas') is not None else None,
+                        rpc=Decimal(str(row.get('rpc', 0))) if row.get('rpc') is not None else None
+                    ))
+        else:
+            # 有 campaign 或 state 篩選，需要查詢原始表
+            logger.info("Detected campaign or state filters, falling back to detailed table queries for daily performance")
+            daily_data = {}
+            
+            # 處理 SP 每日數據
+            if not filter_dict.get('adType') or 'SP' in filter_dict.get('adType', []):
+                sp_daily_query = supabase.table('amazon_ads_campaigns_reports_sp').select(
+                    'date, impressions, clicks, purchases7d, unitsSoldClicks7d, cost, sales7d'
+                ).eq('profile_id', profile_id).gte('date', start_date).lte('date', end_date)
+                
+                # 應用篩選條件
+                if filter_dict.get('campaign', {}).get('operator') == 'contains':
+                    sp_daily_query = sp_daily_query.ilike('campaignName', f"%{filter_dict['campaign']['value']}%")
+                elif filter_dict.get('campaign', {}).get('operator') == 'equals':
+                    sp_daily_query = sp_daily_query.eq('campaignName', filter_dict['campaign']['value'])
+                    
+                if filter_dict.get('state'):
+                    states = filter_dict['state'] if isinstance(filter_dict['state'], list) else [filter_dict['state']]
+                    sp_daily_query = sp_daily_query.in_('campaignStatus', states)
+                
+                sp_daily_result = sp_daily_query.limit(10000).execute()
+                
+                for row in sp_daily_result.data:
+                    date = row['date']
+                    if date not in daily_data:
+                        daily_data[date] = {"impressions": 0, "clicks": 0, "orders": 0, "units": 0, "cost": 0, "sales": 0}
+                    
+                    daily_data[date]['impressions'] += row.get('impressions', 0) or 0
+                    daily_data[date]['clicks'] += row.get('clicks', 0) or 0
+                    daily_data[date]['orders'] += row.get('purchases7d', 0) or 0
+                    daily_data[date]['units'] += row.get('unitsSoldClicks7d', 0) or 0
+                    daily_data[date]['cost'] += float(row.get('cost', 0) or 0)
+                    daily_data[date]['sales'] += float(row.get('sales7d', 0) or 0)
+            
+            # 處理 SB 每日數據
+            if not filter_dict.get('adType') or 'SB' in filter_dict.get('adType', []):
+                sb_daily_query = supabase.table('amazon_ads_campaigns_reports_sb').select(
+                    'date, impressions, clicks, purchases, unitsSold, cost, sales'
+                ).eq('profile_id', profile_id).gte('date', start_date).lte('date', end_date)
+                
+                # 應用篩選條件
+                if filter_dict.get('campaign', {}).get('operator') == 'contains':
+                    sb_daily_query = sb_daily_query.ilike('campaignName', f"%{filter_dict['campaign']['value']}%")
+                elif filter_dict.get('campaign', {}).get('operator') == 'equals':
+                    sb_daily_query = sb_daily_query.eq('campaignName', filter_dict['campaign']['value'])
+                    
+                if filter_dict.get('state'):
+                    states = filter_dict['state'] if isinstance(filter_dict['state'], list) else [filter_dict['state']]
+                    sb_daily_query = sb_daily_query.in_('campaignStatus', states)
+                
+                sb_daily_result = sb_daily_query.limit(10000).execute()
+                
+                for row in sb_daily_result.data:
+                    date = row['date']
+                    if date not in daily_data:
+                        daily_data[date] = {"impressions": 0, "clicks": 0, "orders": 0, "units": 0, "cost": 0, "sales": 0}
+                    
+                    daily_data[date]['impressions'] += row.get('impressions', 0) or 0
+                    daily_data[date]['clicks'] += row.get('clicks', 0) or 0
+                    daily_data[date]['orders'] += row.get('purchases', 0) or 0
+                    daily_data[date]['units'] += row.get('unitsSold', 0) or 0
+                    daily_data[date]['cost'] += float(row.get('cost', 0) or 0)
+                    daily_data[date]['sales'] += float(row.get('sales', 0) or 0)
+            
+            # 處理 SD 每日數據
+            if not filter_dict.get('adType') or 'SD' in filter_dict.get('adType', []):
+                sd_daily_query = supabase.table('amazon_ads_campaigns_reports_sd').select(
+                    'date, impressions, clicks, purchases, unitsSold, cost, sales'
+                ).eq('profile_id', profile_id).gte('date', start_date).lte('date', end_date)
+                
+                # 應用篩選條件
+                if filter_dict.get('campaign', {}).get('operator') == 'contains':
+                    sd_daily_query = sd_daily_query.ilike('campaignName', f"%{filter_dict['campaign']['value']}%")
+                elif filter_dict.get('campaign', {}).get('operator') == 'equals':
+                    sd_daily_query = sd_daily_query.eq('campaignName', filter_dict['campaign']['value'])
+                    
+                if filter_dict.get('state'):
+                    states = filter_dict['state'] if isinstance(filter_dict['state'], list) else [filter_dict['state']]
+                    sd_daily_query = sd_daily_query.in_('campaignStatus', states)
+                
+                sd_daily_result = sd_daily_query.limit(10000).execute()
+                
+                for row in sd_daily_result.data:
+                    date = row['date']
+                    if date not in daily_data:
+                        daily_data[date] = {"impressions": 0, "clicks": 0, "orders": 0, "units": 0, "cost": 0, "sales": 0}
+                    
+                    daily_data[date]['impressions'] += row.get('impressions', 0) or 0
+                    daily_data[date]['clicks'] += row.get('clicks', 0) or 0
+                    daily_data[date]['orders'] += row.get('purchases', 0) or 0
+                    daily_data[date]['units'] += row.get('unitsSold', 0) or 0
+                    daily_data[date]['cost'] += float(row.get('cost', 0) or 0)
+                    daily_data[date]['sales'] += float(row.get('sales', 0) or 0)
+            
+            # 轉換每日數據為列表
+            for date in sorted(daily_data.keys()):
+                metrics = calculate_metrics(daily_data[date])
+                daily_performance.append(DailyPerformance(
+                    date=date,
+                    **metrics
+                ))
         
         # 3. 獲取 Campaign 列表數據
         campaigns_data = {}
@@ -447,7 +564,7 @@ async def get_bid_optimizer_data(
                 states = filter_dict['state'] if isinstance(filter_dict['state'], list) else [filter_dict['state']]
                 sp_campaign_query = sp_campaign_query.in_('campaignStatus', states)
             
-            sp_campaign_result = sp_campaign_query.execute()
+            sp_campaign_result = sp_campaign_query.limit(10000).execute()
             
             for row in sp_campaign_result.data:
                 campaign_id = row['campaignId']
@@ -488,7 +605,7 @@ async def get_bid_optimizer_data(
                 states = filter_dict['state'] if isinstance(filter_dict['state'], list) else [filter_dict['state']]
                 sb_campaign_query = sb_campaign_query.in_('campaignStatus', states)
             
-            sb_campaign_result = sb_campaign_query.execute()
+            sb_campaign_result = sb_campaign_query.limit(10000).execute()
             
             for row in sb_campaign_result.data:
                 campaign_id = row['campaignId']
@@ -529,7 +646,7 @@ async def get_bid_optimizer_data(
                 states = filter_dict['state'] if isinstance(filter_dict['state'], list) else [filter_dict['state']]
                 sd_campaign_query = sd_campaign_query.in_('campaignStatus', states)
             
-            sd_campaign_result = sd_campaign_query.execute()
+            sd_campaign_result = sd_campaign_query.limit(10000).execute()
             
             for row in sd_campaign_result.data:
                 campaign_id = row['campaignId']

@@ -3,6 +3,7 @@ from typing import Dict, Any, List, Optional
 from datetime import datetime, timedelta
 import logging
 import traceback
+from pydantic import BaseModel, Field
 
 from ...services.amazon_ads import amazon_ads_service, supabase
 from ...core.security import decrypt_token
@@ -353,3 +354,171 @@ async def sync_amazon_advertising_campaign_reports(
         logger.error(f"申請廣告活動報告時出錯: {str(e)}")
         logger.error(traceback.format_exc())
         raise HTTPException(status_code=500, detail=f"Internal server error: {str(e)}")
+
+
+class RefreshDailySummaryRequest(BaseModel):
+    """刷新每日聚合數據的請求模型"""
+    profile_id: Optional[str] = Field(None, description="特定的 profile ID，如果為空則處理所有")
+    start_date: Optional[str] = Field(None, description="開始日期 (YYYY-MM-DD)")
+    end_date: Optional[str] = Field(None, description="結束日期 (YYYY-MM-DD)")
+    recent_days: Optional[int] = Field(None, description="填充最近 N 天的數據", ge=1, le=365)
+    
+    class Config:
+        schema_extra = {
+            "example": {
+                "profile_id": "3503006764689374",
+                "recent_days": 32
+            }
+        }
+
+
+class RefreshDailySummaryResponse(BaseModel):
+    """刷新每日聚合數據的響應模型"""
+    success: bool
+    affected_rows: int
+    message: str
+    parameters: Dict[str, Any]
+    execution_time: float
+    
+    class Config:
+        schema_extra = {
+            "example": {
+                "success": True,
+                "affected_rows": 32,
+                "message": "Successfully refreshed daily summary data",
+                "parameters": {
+                    "profile_id": "3503006764689374",
+                    "start_date": "2024-03-01",
+                    "end_date": "2024-04-01"
+                },
+                "execution_time": 2.5
+            }
+        }
+
+
+@router.post(
+    "/refresh-daily-summary",
+    summary="刷新每日聚合數據",
+    description="""
+    刷新 amazon_ads_daily_summary 表的聚合數據。
+    
+    此 API 會調用資料庫函數來重新計算並更新每日聚合數據，用於提升查詢性能。
+    
+    使用場景：
+    1. 在報告處理完成後，更新相應日期的聚合數據
+    2. 定期維護以確保聚合數據的準確性
+    3. 手動修復特定日期範圍的數據
+    
+    參數優先級：
+    - 如果提供 recent_days，將忽略 start_date 和 end_date
+    - 如果未提供任何日期參數，默認處理最近 32 天
+    
+    注意：此操作可能需要較長時間，建議在流量較低的時段執行。
+    """,
+    response_model=RefreshDailySummaryResponse,
+    responses={
+        200: {
+            "description": "成功刷新聚合數據",
+            "model": RefreshDailySummaryResponse
+        },
+        400: {"description": "無效的請求參數"},
+        500: {"description": "刷新聚合數據時出錯"}
+    }
+)
+async def refresh_daily_summary(
+    request: RefreshDailySummaryRequest = RefreshDailySummaryRequest()
+):
+    """
+    刷新每日聚合數據
+    
+    參數:
+        request: 包含刷新參數的請求對象
+        
+    返回:
+        RefreshDailySummaryResponse: 刷新結果
+    """
+    start_time = datetime.now()
+    
+    try:
+        # 準備參數
+        params = {}
+        
+        # 處理日期參數
+        if request.recent_days:
+            # 使用 recent_days
+            end_date = datetime.now().date()
+            start_date = end_date - timedelta(days=request.recent_days)
+            params['p_start_date'] = start_date.strftime('%Y-%m-%d')
+            params['p_end_date'] = end_date.strftime('%Y-%m-%d')
+            logger.info(f"Using recent_days={request.recent_days}: {params['p_start_date']} to {params['p_end_date']}")
+        elif request.start_date and request.end_date:
+            # 使用指定的日期範圍
+            params['p_start_date'] = request.start_date
+            params['p_end_date'] = request.end_date
+            logger.info(f"Using specified date range: {request.start_date} to {request.end_date}")
+        elif request.start_date or request.end_date:
+            # 只提供了一個日期，返回錯誤
+            raise HTTPException(
+                status_code=400, 
+                detail="Both start_date and end_date must be provided together"
+            )
+        else:
+            # 默認處理最近 32 天
+            end_date = datetime.now().date()
+            start_date = end_date - timedelta(days=32)
+            params['p_start_date'] = start_date.strftime('%Y-%m-%d')
+            params['p_end_date'] = end_date.strftime('%Y-%m-%d')
+            logger.info(f"Using default 32 days: {params['p_start_date']} to {params['p_end_date']}")
+        
+        # 添加 profile_id 參數（如果提供）
+        if request.profile_id:
+            params['p_profile_id'] = request.profile_id
+            logger.info(f"Processing specific profile: {request.profile_id}")
+        else:
+            logger.info("Processing all profiles")
+        
+        # 調用資料庫函數
+        logger.info(f"Calling refresh_amazon_ads_daily_summary with params: {params}")
+        result = supabase.rpc('refresh_amazon_ads_daily_summary', params).execute()
+        
+        # 計算執行時間
+        execution_time = (datetime.now() - start_time).total_seconds()
+        
+        # 處理結果
+        if result.data and len(result.data) > 0:
+            affected_rows = result.data[0].get('affected_rows', 0)
+            status = result.data[0].get('status', 'Unknown')
+            
+            logger.info(f"Daily summary refresh completed: {affected_rows} rows affected, status: {status}")
+            
+            return RefreshDailySummaryResponse(
+                success=True,
+                affected_rows=affected_rows,
+                message=f"Successfully refreshed daily summary data. Status: {status}",
+                parameters=params,
+                execution_time=execution_time
+            )
+        else:
+            logger.error("No data returned from refresh_amazon_ads_daily_summary function")
+            raise HTTPException(
+                status_code=500,
+                detail="Database function returned no data"
+            )
+            
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error refreshing daily summary: {str(e)}")
+        logger.error(traceback.format_exc())
+        
+        # 計算執行時間
+        execution_time = (datetime.now() - start_time).total_seconds()
+        
+        # 返回錯誤響應
+        return RefreshDailySummaryResponse(
+            success=False,
+            affected_rows=0,
+            message=f"Failed to refresh daily summary: {str(e)}",
+            parameters=params if 'params' in locals() else {},
+            execution_time=execution_time
+        )
