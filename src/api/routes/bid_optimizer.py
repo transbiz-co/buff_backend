@@ -161,6 +161,25 @@ def calculate_change_percentage(current: Decimal, previous: Decimal) -> Optional
     return f"{sign}{round(change, 1)}%"
 
 
+def map_state_values(states: List[str]) -> List[str]:
+    """Convert frontend state values to Amazon Ads campaign status values
+    
+    Mapping:
+    - 'active' -> 'ENABLED'
+    - 'paused' -> 'PAUSED'
+    - Others -> uppercase
+    """
+    mapped_states = []
+    for state in states:
+        if state.lower() == 'active':
+            mapped_states.append('ENABLED')
+        elif state.lower() == 'paused':
+            mapped_states.append('PAUSED')
+        else:
+            mapped_states.append(state.upper())
+    return mapped_states
+
+
 def build_filter_clause(filters: Optional[Dict[str, Any]]) -> tuple[str, Dict[str, Any]]:
     """構建篩選條件的 SQL 子句"""
     where_clauses = []
@@ -234,6 +253,17 @@ async def get_bid_optimizer_data(
         # 解析篩選條件
         import json
         filter_dict = json.loads(filters) if filters else {}
+        logger.info(f"Received filters: {filter_dict}")
+        
+        # Debug: Check available campaign statuses when filter is active
+        if filter_dict.get('state'):
+            debug_query = supabase.table('amazon_ads_campaigns_reports_sp').select(
+                'campaignStatus'
+            ).eq('profile_id', profile_id).limit(100).execute()
+            
+            if debug_query.data:
+                unique_statuses = list(set([row.get('campaignStatus', 'N/A') for row in debug_query.data]))
+                logger.info(f"Available campaign statuses in database: {unique_statuses}")
         
         # 計算前期日期範圍
         start_dt = datetime.strptime(start_date, "%Y-%m-%d")
@@ -314,7 +344,8 @@ async def get_bid_optimizer_data(
                 
             if filter_dict.get('state'):
                 states = filter_dict['state'] if isinstance(filter_dict['state'], list) else [filter_dict['state']]
-                sp_query = sp_query.in_('campaignStatus', states)
+                mapped_states = map_state_values(states)
+                sp_query = sp_query.in_('campaignStatus', mapped_states)
             
             sp_result = sp_query.limit(10000).execute()
             
@@ -344,7 +375,8 @@ async def get_bid_optimizer_data(
                     
                 if filter_dict.get('state'):
                     states = filter_dict['state'] if isinstance(filter_dict['state'], list) else [filter_dict['state']]
-                    sb_query = sb_query.in_('campaignStatus', states)
+                    mapped_states = map_state_values(states)
+                    sb_query = sb_query.in_('campaignStatus', mapped_states)
                 
                 sb_result = sb_query.limit(10000).execute()
                 
@@ -374,7 +406,8 @@ async def get_bid_optimizer_data(
                     
                 if filter_dict.get('state'):
                     states = filter_dict['state'] if isinstance(filter_dict['state'], list) else [filter_dict['state']]
-                    sd_query = sd_query.in_('campaignStatus', states)
+                    mapped_states = map_state_values(states)
+                    sd_query = sd_query.in_('campaignStatus', mapped_states)
                 
                 sd_result = sd_query.limit(10000).execute()
                 
@@ -480,7 +513,8 @@ async def get_bid_optimizer_data(
                     
                 if filter_dict.get('state'):
                     states = filter_dict['state'] if isinstance(filter_dict['state'], list) else [filter_dict['state']]
-                    sp_daily_query = sp_daily_query.in_('campaignStatus', states)
+                    mapped_states = map_state_values(states)
+                    sp_daily_query = sp_daily_query.in_('campaignStatus', mapped_states)
                 
                 sp_daily_result = sp_daily_query.limit(10000).execute()
                 
@@ -510,7 +544,8 @@ async def get_bid_optimizer_data(
                     
                 if filter_dict.get('state'):
                     states = filter_dict['state'] if isinstance(filter_dict['state'], list) else [filter_dict['state']]
-                    sb_daily_query = sb_daily_query.in_('campaignStatus', states)
+                    mapped_states = map_state_values(states)
+                    sb_daily_query = sb_daily_query.in_('campaignStatus', mapped_states)
                 
                 sb_daily_result = sb_daily_query.limit(10000).execute()
                 
@@ -540,7 +575,8 @@ async def get_bid_optimizer_data(
                     
                 if filter_dict.get('state'):
                     states = filter_dict['state'] if isinstance(filter_dict['state'], list) else [filter_dict['state']]
-                    sd_daily_query = sd_daily_query.in_('campaignStatus', states)
+                    mapped_states = map_state_values(states)
+                    sd_daily_query = sd_daily_query.in_('campaignStatus', mapped_states)
                 
                 sd_daily_result = sd_daily_query.limit(10000).execute()
                 
@@ -581,9 +617,17 @@ async def get_bid_optimizer_data(
                 
             if filter_dict.get('state'):
                 states = filter_dict['state'] if isinstance(filter_dict['state'], list) else [filter_dict['state']]
-                sp_campaign_query = sp_campaign_query.in_('campaignStatus', states)
+                mapped_states = map_state_values(states)
+                logger.info(f"SP Campaign state filter - Original: {states}, Mapped: {mapped_states}")
+                sp_campaign_query = sp_campaign_query.in_('campaignStatus', mapped_states)
             
             sp_campaign_result = sp_campaign_query.limit(10000).execute()
+            logger.info(f"SP Campaign query returned {len(sp_campaign_result.data)} results")
+            
+            # Log sample campaign statuses for debugging
+            if sp_campaign_result.data:
+                sample_statuses = list(set([row.get('campaignStatus', 'N/A') for row in sp_campaign_result.data[:10]]))
+                logger.info(f"Sample SP campaign statuses: {sample_statuses}")
             
             for row in sp_campaign_result.data:
                 campaign_id = row['campaignId']
@@ -646,9 +690,12 @@ async def get_bid_optimizer_data(
                 
             if filter_dict.get('state'):
                 states = filter_dict['state'] if isinstance(filter_dict['state'], list) else [filter_dict['state']]
-                sb_campaign_query = sb_campaign_query.in_('campaignStatus', states)
+                mapped_states = map_state_values(states)
+                logger.info(f"SB Campaign state filter - Original: {states}, Mapped: {mapped_states}")
+                sb_campaign_query = sb_campaign_query.in_('campaignStatus', mapped_states)
             
             sb_campaign_result = sb_campaign_query.limit(10000).execute()
+            logger.info(f"SB Campaign query returned {len(sb_campaign_result.data)} results")
             
             for row in sb_campaign_result.data:
                 campaign_id = row['campaignId']
@@ -693,9 +740,12 @@ async def get_bid_optimizer_data(
                 
             if filter_dict.get('state'):
                 states = filter_dict['state'] if isinstance(filter_dict['state'], list) else [filter_dict['state']]
-                sd_campaign_query = sd_campaign_query.in_('campaignStatus', states)
+                mapped_states = map_state_values(states)
+                logger.info(f"SD Campaign state filter - Original: {states}, Mapped: {mapped_states}")
+                sd_campaign_query = sd_campaign_query.in_('campaignStatus', mapped_states)
             
             sd_campaign_result = sd_campaign_query.limit(10000).execute()
+            logger.info(f"SD Campaign query returned {len(sd_campaign_result.data)} results")
             
             for row in sd_campaign_result.data:
                 campaign_id = row['campaignId']
