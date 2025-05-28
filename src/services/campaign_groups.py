@@ -73,12 +73,12 @@ class CampaignGroupService:
         """
         try:
             # Get all groups for the user
-            groups_result = supabase.table('campaign_groups').select('*').eq('user_id', user_id).order('created_at', desc=True).execute()
+            groups_result = supabase.table('campaign_groups').select('*').eq('user_id', user_id).order('created_at', desc=True).limit(10000).execute()
             
             groups = []
             for group_data in groups_result.data:
                 # Get campaigns assigned to this group
-                campaigns_result = supabase.table('amazon_ads_campaigns').select('campaign_id').eq('group_id', group_data['id']).execute()
+                campaigns_result = supabase.table('amazon_ads_campaigns').select('campaign_id').eq('group_id', group_data['id']).limit(10000).execute()
                 campaign_ids = [str(c['campaign_id']) for c in campaigns_result.data]
                 
                 groups.append(CampaignGroupResponse.from_db(group_data, campaign_ids))
@@ -118,7 +118,7 @@ class CampaignGroupService:
             group_data = result.data[0]
             
             # Get campaigns for this group
-            campaigns_result = supabase.table('amazon_ads_campaigns').select('campaign_id').eq('group_id', group_id).execute()
+            campaigns_result = supabase.table('amazon_ads_campaigns').select('campaign_id').eq('group_id', group_id).limit(10000).execute()
             campaign_ids = [str(c['campaign_id']) for c in campaigns_result.data]
             
             return CampaignGroupResponse.from_db(group_data, campaign_ids)
@@ -167,7 +167,7 @@ class CampaignGroupService:
                 return None
             
             # Get updated campaigns
-            campaigns_result = supabase.table('amazon_ads_campaigns').select('campaign_id').eq('group_id', group_id).execute()
+            campaigns_result = supabase.table('amazon_ads_campaigns').select('campaign_id').eq('group_id', group_id).limit(10000).execute()
             campaign_ids = [str(c['campaign_id']) for c in campaigns_result.data]
             
             logger.info(f"Updated campaign group {group_id}")

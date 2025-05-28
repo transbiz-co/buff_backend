@@ -283,7 +283,7 @@ async def get_bid_optimizer_data(
         # 查詢聚合表獲取當期和前期數據
         summary_result = supabase.table('amazon_ads_daily_summary').select(
             'date, impressions, clicks, orders, units, cost, sales, sp_campaign_count, sb_campaign_count, sd_campaign_count'
-        ).eq('profile_id', profile_id).gte('date', prev_start_date).lte('date', end_date).execute()
+        ).eq('profile_id', profile_id).gte('date', prev_start_date).lte('date', end_date).limit(10000).execute()
         
         # 處理聚合數據
         for row in summary_result.data:
@@ -443,7 +443,7 @@ async def get_bid_optimizer_data(
             # 使用聚合表查詢每日數據
             daily_result = supabase.table('amazon_ads_daily_summary').select(
                 'date, impressions, clicks, orders, units, cost, sales, acos, ctr, cvr, cpc, roas, rpc, sp_campaign_count, sb_campaign_count, sd_campaign_count'
-            ).eq('profile_id', profile_id).gte('date', start_date).lte('date', end_date).order('date').execute()
+            ).eq('profile_id', profile_id).gte('date', start_date).lte('date', end_date).order('date').limit(10000).execute()
             
             for row in daily_result.data:
                 # 檢查 adType 篩選條件
@@ -609,7 +609,7 @@ async def get_bid_optimizer_data(
             # Get all campaigns with their group information for this profile
             campaigns_with_groups = supabase.table('amazon_ads_campaigns').select(
                 'campaign_id, group_id, campaign_groups(id, name)'
-            ).eq('profile_id', profile_id).execute()
+            ).eq('profile_id', profile_id).limit(10000).execute()
             
             # Build a mapping of campaign_id to group name
             logger.info(f"Retrieved {len(campaigns_with_groups.data)} campaigns from amazon_ads_campaigns table")
