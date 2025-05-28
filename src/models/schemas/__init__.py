@@ -1,1 +1,3 @@
-# 空檔案初始化模塊
+# Export schemas for easy importing
+from .amazon_ads import *
+from .campaign_groups import *
