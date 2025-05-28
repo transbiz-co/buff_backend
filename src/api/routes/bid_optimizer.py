@@ -603,6 +603,26 @@ async def get_bid_optimizer_data(
         # 3. 獲取 Campaign 列表數據
         campaigns_data = {}
         
+        # First, get campaign group mappings for this profile
+        campaign_groups = {}
+        try:
+            # Get all campaigns with their group information for this profile
+            campaigns_with_groups = supabase.table('amazon_ads_campaigns').select(
+                'campaign_id, group_id, campaign_groups(id, name)'
+            ).eq('profile_id', profile_id).execute()
+            
+            # Build a mapping of campaign_id to group name
+            logger.info(f"Retrieved {len(campaigns_with_groups.data)} campaigns from amazon_ads_campaigns table")
+            for campaign in campaigns_with_groups.data:
+                if campaign.get('group_id') and campaign.get('campaign_groups'):
+                    campaign_groups[str(campaign['campaign_id'])] = campaign['campaign_groups']['name']
+                    logger.info(f"Mapping: Campaign ID {campaign['campaign_id']} -> Group '{campaign['campaign_groups']['name']}'")
+            
+            logger.info(f"Loaded {len(campaign_groups)} campaign group mappings for profile {profile_id}")
+        except Exception as e:
+            logger.error(f"Error loading campaign groups: {str(e)}")
+            # Continue without campaign groups if there's an error
+        
         # 處理 SP campaigns
         if not filter_dict.get('adType') or 'SP' in filter_dict.get('adType', []):
             sp_campaign_query = supabase.table('amazon_ads_campaigns_reports_sp').select(
@@ -786,11 +806,20 @@ async def get_bid_optimizer_data(
                 logger.info(f"Campaign {campaign_data['campaignId']} final data: cost={campaign_data['cost']}, sales={campaign_data['sales']}")
                 logger.info(f"Campaign {campaign_data['campaignId']} metrics: spend={metrics.get('spend')}, sales={metrics.get('sales')}")
             
+            # Get campaign group name from the mapping
+            campaign_id = str(campaign_data['campaignId'])
+            campaign_group_name = campaign_groups.get(campaign_id)
+            if campaign_group_name:
+                logger.info(f"Found group '{campaign_group_name}' for campaign {campaign_id}")
+            else:
+                logger.warning(f"No group found for campaign {campaign_id} - available keys: {list(campaign_groups.keys())[:5]}...")
+            
             campaign = CampaignData(
                 campaignId=campaign_data['campaignId'],
                 campaignName=campaign_data['campaignName'],
                 adType=campaign_data['ad_type'],
                 campaignStatus=campaign_data['campaignStatus'],
+                optGroup=campaign_group_name,  # Set the campaign group name
                 **metrics
             )
             campaigns.append(campaign)
