@@ -686,8 +686,8 @@ async def get_bid_optimizer_data(
                     logger.warning(f"SP Campaign {campaign_id}: Invalid sales7d value: {row.get('sales7d')}, error: {e}")
                     sales_value = 0.0
                 
-                if campaign_id and (cost_value > 0 or sales_value > 0):
-                    logger.info(f"SP Campaign {campaign_id}: cost={cost_value}, sales7d={sales_value}")
+                # if campaign_id and (cost_value > 0 or sales_value > 0):
+                #     logger.info(f"SP Campaign {campaign_id}: cost={cost_value}, sales7d={sales_value}")
                 
                 campaigns_data[campaign_id]['impressions'] += row.get('impressions', 0) or 0
                 campaigns_data[campaign_id]['clicks'] += row.get('clicks', 0) or 0
@@ -802,17 +802,17 @@ async def get_bid_optimizer_data(
             metrics = calculate_metrics(campaign_data)
             
             # 添加調試日誌檢查最終數據
-            if campaign_data['cost'] > 0 or campaign_data['sales'] > 0:
-                logger.info(f"Campaign {campaign_data['campaignId']} final data: cost={campaign_data['cost']}, sales={campaign_data['sales']}")
-                logger.info(f"Campaign {campaign_data['campaignId']} metrics: spend={metrics.get('spend')}, sales={metrics.get('sales')}")
+            # if campaign_data['cost'] > 0 or campaign_data['sales'] > 0:
+            #     logger.info(f"Campaign {campaign_data['campaignId']} final data: cost={campaign_data['cost']}, sales={campaign_data['sales']}")
+            #     logger.info(f"Campaign {campaign_data['campaignId']} metrics: spend={metrics.get('spend')}, sales={metrics.get('sales')}")
             
             # Get campaign group name from the mapping
             campaign_id = str(campaign_data['campaignId'])
             campaign_group_name = campaign_groups.get(campaign_id)
-            if campaign_group_name:
-                logger.info(f"Found group '{campaign_group_name}' for campaign {campaign_id}")
-            else:
-                logger.warning(f"No group found for campaign {campaign_id} - available keys: {list(campaign_groups.keys())[:5]}...")
+            # if campaign_group_name:
+            #     logger.info(f"Found group '{campaign_group_name}' for campaign {campaign_id}")
+            # else:
+            #     logger.warning(f"No group found for campaign {campaign_id} - available keys: {list(campaign_groups.keys())[:5]}...")
             
             campaign = CampaignData(
                 campaignId=campaign_data['campaignId'],
