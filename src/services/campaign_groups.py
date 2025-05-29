@@ -39,6 +39,7 @@ class CampaignGroupService:
             insert_data = {
                 'user_id': user_id,
                 'name': group_data.name,
+                'profile_id': group_data.profile_id,
                 'description': group_data.description,
                 'target_acos': float(group_data.target_acos) if group_data.target_acos else None,
                 'preset_goal': group_data.preset_goal,
@@ -61,19 +62,26 @@ class CampaignGroupService:
             logger.error(f"Error creating campaign group: {str(e)}")
             raise
     
-    async def get_user_groups(self, user_id: str) -> CampaignGroupListResponse:
+    async def get_user_groups(self, user_id: str, profile_id: Optional[int] = None) -> CampaignGroupListResponse:
         """
         Get all campaign groups for a user with campaign assignments
         
         Args:
             user_id: User ID
+            profile_id: Optional profile ID to filter by
             
         Returns:
             List of campaign groups with metadata
         """
         try:
             # Get all groups for the user
-            groups_result = supabase.table('campaign_groups').select('*').eq('user_id', user_id).order('created_at', desc=True).limit(10000).execute()
+            query = supabase.table('campaign_groups').select('*').eq('user_id', user_id)
+            
+            # Add profile filter if provided
+            if profile_id is not None:
+                query = query.eq('profile_id', profile_id)
+                
+            groups_result = query.order('created_at', desc=True).limit(10000).execute()
             
             groups = []
             for group_data in groups_result.data:
@@ -84,7 +92,13 @@ class CampaignGroupService:
                 groups.append(CampaignGroupResponse.from_db(group_data, campaign_ids))
             
             # Count unassigned campaigns
-            unassigned_result = supabase.table('amazon_ads_campaigns').select('campaign_id', count='exact').is_('group_id', 'null').execute()
+            unassigned_query = supabase.table('amazon_ads_campaigns').select('campaign_id', count='exact').is_('group_id', 'null')
+            
+            # Filter by profile_id if provided
+            if profile_id is not None:
+                unassigned_query = unassigned_query.eq('profile_id', profile_id)
+                
+            unassigned_result = unassigned_query.execute()
             unassigned_count = unassigned_result.count or 0
             
             return CampaignGroupListResponse(

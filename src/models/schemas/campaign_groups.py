@@ -11,6 +11,7 @@ from decimal import Decimal
 class CampaignGroupBase(BaseModel):
     """Base campaign group model with common fields"""
     name: str = Field(..., min_length=1, max_length=255, description="Campaign group name")
+    profile_id: int = Field(..., description="Amazon Ads profile ID")
     description: Optional[str] = Field(None, description="Optional description of the group")
     target_acos: Optional[Decimal] = Field(
         None, 
@@ -103,6 +104,7 @@ class CampaignGroupResponse(CampaignGroupBase):
         return cls(
             id=str(db_group['id']),
             name=db_group['name'],
+            profile_id=db_group['profile_id'],
             user_id=db_group['user_id'],
             description=db_group.get('description'),
             targetAcos=db_group.get('target_acos'),
