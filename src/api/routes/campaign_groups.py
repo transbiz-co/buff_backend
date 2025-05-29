@@ -3,7 +3,7 @@ Campaign Groups API Routes
 Provides endpoints for managing campaign groups
 """
 import logging
-from typing import List
+from typing import List, Optional
 from fastapi import APIRouter, HTTPException, Query, Path, Depends
 
 from ...models.schemas.campaign_groups import (
@@ -54,7 +54,8 @@ async def create_campaign_group(
 
 @router.get("", response_model=CampaignGroupListResponse)
 async def get_campaign_groups(
-    user_id: str = Query(..., description="User ID")
+    user_id: str = Query(..., description="User ID"),
+    profile_id: Optional[int] = Query(None, description="Filter by profile ID")
 ):
     """
     Get all campaign groups for a user
@@ -65,7 +66,7 @@ async def get_campaign_groups(
     - Count of unassigned campaigns
     """
     try:
-        return await campaign_group_service.get_user_groups(user_id)
+        return await campaign_group_service.get_user_groups(user_id, profile_id)
     except Exception as e:
         logger.error(f"Error getting campaign groups: {str(e)}")
         raise HTTPException(status_code=500, detail=str(e))
